@@ -269,6 +269,7 @@ mcp = FastMCP(
 from tools.editor_tools import register_editor_tools
 from tools.blueprint_tools import register_blueprint_tools
 from tools.node_tools import register_blueprint_node_tools
+from tools.material_tools import register_material_tools
 from tools.project_tools import register_project_tools
 from tools.umg_tools import register_umg_tools
 
@@ -276,6 +277,7 @@ from tools.umg_tools import register_umg_tools
 register_editor_tools(mcp)
 register_blueprint_tools(mcp)
 register_blueprint_node_tools(mcp)
+register_material_tools(mcp)
 register_project_tools(mcp)
 register_umg_tools(mcp)  
 
@@ -331,6 +333,16 @@ def info():
     - `add_blueprint_get_self_component_reference(blueprint_name, component_name)` - Add component refs
     - `add_blueprint_self_reference(blueprint_name)` - Add self references
     - `find_blueprint_nodes(blueprint_name, node_type, event_type)` - Find nodes
+
+    ## Material Management
+    - `create_material(material_path)` - Create a material asset
+    - `set_material_properties(material_path, properties)` - Set material asset properties
+    - `add_material_expression(material_path, expression_type, expression_name="", position=[0,0], properties={})` - Add a material node
+    - `set_material_expression_property(material_path, expression, property_name, property_value)` - Edit a material node property
+    - `connect_material_expressions(material_path, from_expression, to_expression, from_output_name="", to_input_name="")` - Connect two nodes
+    - `connect_material_property(material_path, expression, property_name, from_output_name="")` - Connect a node to the material root
+    - `recompile_material(material_path)` - Recompile and save a material
+    - `configure_glass_material(material_path, ...)` - Build a realistic glass preset
     
     ## Project Tools
     - `create_input_mapping(action_name, key, input_type)` - Create input mappings

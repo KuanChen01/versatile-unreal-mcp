@@ -60,10 +60,12 @@ public class UnrealMCP : ModuleRules
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
+					"AssetTools",
 					"PropertyEditor",      // For widget property editing
 					"ToolMenus",           // For editor UI
 					"BlueprintEditorLibrary", // For Blueprint utilities
-					"UMGEditor"           // For WidgetBlueprint.h and other UMG editor functionality
+					"UMGEditor",          // For WidgetBlueprint.h and other UMG editor functionality
+					"MaterialEditor"
 				}
 			);
 		}

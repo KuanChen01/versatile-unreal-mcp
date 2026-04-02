@@ -1,119 +1,90 @@
 <div align="center">
 
-# Model Context Protocol for Unreal Engine
-<span style="color: #555555">unreal-mcp</span>
+# versatile-unreal-mcp
+<span style="color: #555555">Model Context Protocol for Unreal Engine</span>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.5%2B-orange)](https://www.unrealengine.com)
+[![Validated](https://img.shields.io/badge/Validated-UE%205.7-green)](https://www.unrealengine.com)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-yellow)](https://www.python.org)
-[![Status](https://img.shields.io/badge/Status-Experimental-red)](https://github.com/chongdashu/unreal-mcp)
+[![Status](https://img.shields.io/badge/Status-Experimental-red)](https://github.com/KuanChen01/versatile-unreal-mcp)
 
 </div>
 
-This project enables AI assistant clients like Cursor, Windsurf and Claude Desktop to control Unreal Engine through natural language using the Model Context Protocol (MCP).
+`versatile-unreal-mcp` lets MCP-capable AI clients control Unreal Editor with natural language. It provides a native Unreal plugin plus a Python MCP server, and is designed to be copied into existing Unreal projects instead of being tied to a single sample game.
 
-## ⚠️ Experimental Status
+Validated in practice on Unreal Engine `5.7`, while still targeting `5.5+`.
 
-This project is currently in an **EXPERIMENTAL** state. The API, functionality, and implementation details are subject to significant changes. While we encourage testing and feedback, please be aware that:
+## Highlights
 
-- Breaking changes may occur without notice
-- Features may be incomplete or unstable
-- Documentation may be outdated or missing
-- Production use is not recommended at this time
+- Works with existing Unreal projects by copying `MCPGameProject/Plugins/UnrealMCP` into your own `Plugins/` folder
+- Supports MCP clients such as `Codex`, `OpenCode`, `Claude Desktop`, `Cursor`, and `Windsurf`
+- Covers editor automation, actor spawning, Blueprint creation, Blueprint node editing, UMG widget editing, and project input mappings
+- Adds material authoring tools for editor workflows, including material creation, expression graph editing, and a ready-made glass material preset
+- Keeps the Python MCP server separate from the Unreal project so one server setup can be reused across multiple Unreal projects
 
-## 🌟 Overview
+## Capability Overview
 
-The Unreal MCP integration provides comprehensive tools for controlling Unreal Engine through natural language:
+| Area | What it can do |
+| --- | --- |
+| Actor Management | List actors, find actors by name, spawn actors, delete actors, move and rotate actors, inspect actor properties |
+| Blueprint Authoring | Create Blueprints, add components, set mesh and physics properties, compile, set defaults, spawn Blueprint actors |
+| Blueprint Graph Editing | Add event nodes, input nodes, function nodes, self/component references, variables, and connect graph pins |
+| Material Authoring | Create materials, edit material properties, add expressions, connect expressions, connect root material properties, recompile materials, build a realistic glass preset |
+| UMG Authoring | Create widget Blueprints, add text blocks and buttons, bind widget events, add widgets to viewport |
+| Editor Utilities | Focus the viewport and take screenshots |
 
-| Category | Capabilities |
-|----------|-------------|
-| **Actor Management** | • Create and delete actors (cubes, spheres, lights, cameras, etc.)<br>• Set actor transforms (position, rotation, scale)<br>• Query actor properties and find actors by name<br>• List all actors in the current level |
-| **Blueprint Development** | • Create new Blueprint classes with custom components<br>• Add and configure components (mesh, camera, light, etc.)<br>• Set component properties and physics settings<br>• Compile Blueprints and spawn Blueprint actors<br>• Create input mappings for player controls |
-| **Blueprint Node Graph** | • Add event nodes (BeginPlay, Tick, etc.)<br>• Create function call nodes and connect them<br>• Add variables with custom types and default values<br>• Create component and self references<br>• Find and manage nodes in the graph |
-| **Editor Control** | • Focus viewport on specific actors or locations<br>• Control viewport camera orientation and distance |
+## Repository Layout
 
-All these capabilities are accessible through natural language commands via AI assistants, making it easy to automate and control Unreal Engine workflows.
+- [MCPGameProject](MCPGameProject)
+  Sample Unreal project containing the `UnrealMCP` plugin.
+- [MCPGameProject/Plugins/UnrealMCP](MCPGameProject/Plugins/UnrealMCP)
+  The Unreal Editor plugin that opens the TCP bridge and executes commands.
+- [Python](Python)
+  The Python MCP server and tool registration layer.
+- [Docs](Docs)
+  Supplemental documentation.
 
-## 🧩 Components
-
-### Sample Project (MCPGameProject) `MCPGameProject`
-- Based off the Blank Project, but with the UnrealMCP plugin added.
-
-### Plugin (UnrealMCP) `MCPGameProject/Plugins/UnrealMCP`
-- Native TCP server for MCP communication
-- Integrates with Unreal Editor subsystems
-- Implements actor manipulation tools
-- Handles command execution and response handling
-
-### Python MCP Server `Python/unreal_mcp_server.py`
-- Implemented in `unreal_mcp_server.py`
-- Manages TCP socket connections to the C++ plugin (port 55557)
-- Handles command serialization and response parsing
-- Provides error handling and connection management
-- Loads and registers tool modules from the `tools` directory
-- Uses the FastMCP library to implement the Model Context Protocol
-
-## 📂 Directory Structure
-
-- **MCPGameProject/** - Example Unreal project
-  - **Plugins/UnrealMCP/** - C++ plugin source
-    - **Source/UnrealMCP/** - Plugin source code
-    - **UnrealMCP.uplugin** - Plugin definition
-
-- **Python/** - Python server and tools
-  - **tools/** - Tool modules for actor, editor, and blueprint operations
-  - **scripts/** - Example scripts and demos
-
-- **Docs/** - Comprehensive documentation
-  - See [Docs/README.md](Docs/README.md) for documentation index
-
-## 🚀 Quick Start Guide
+## Quick Start
 
 ### Prerequisites
-- Unreal Engine 5.5+
-- Python 3.12+
-- MCP Client (e.g., Claude Desktop, Cursor, Windsurf)
 
-### Sample project
+- Unreal Engine `5.5+`
+- Python `3.12+`
+- [`uv`](https://docs.astral.sh/uv/)
+- An MCP client such as `Codex`, `OpenCode`, `Claude Desktop`, `Cursor`, or `Windsurf`
 
-For getting started quickly, feel free to use the starter project in `MCPGameProject`. This is a UE 5.5 Blank Starter Project with the `UnrealMCP.uplugin` already configured. 
+### Option A: Use the sample project
 
-1. **Prepare the project**
-   - Right-click your .uproject file
-   - Generate Visual Studio project files
-2. **Build the project (including the plugin)**
-   - Open solution (`.sln`)
-   - Choose `Development Editor` as your target.
-   - Build
+1. Open [MCPGameProject](MCPGameProject).
+2. Generate project files for the `.uproject`.
+3. Build the `Development Editor` target.
+4. Start the editor, then run the Python MCP server from [Python](D:\MCP\Unreal\Python).
 
-### Plugin
-Otherwise, if you want to use the plugin in your existing project:
+### Option B: Reuse in your own Unreal project
 
-1. **Copy the plugin to your project**
-   - Copy `MCPGameProject/Plugins/UnrealMCP` to your project's Plugins folder
+1. Copy [UnrealMCP](MCPGameProject/Plugins/UnrealMCP) into your Unreal project's `Plugins/` directory.
+2. Enable the plugin in Unreal Editor if it is not already enabled.
+3. Generate project files for your `.uproject`.
+4. Build your Editor target so the plugin is compiled against that project.
+5. Run the shared Python MCP server from [Python](D:\MCP\Unreal\Python).
 
-2. **Enable the plugin**
-   - Edit > Plugins
-   - Find "UnrealMCP" in Editor category
-   - Enable the plugin
-   - Restart editor when prompted
+This reuse model is the intended workflow. The plugin changes in this repository are not tied to any single project path or asset set.
 
-3. **Build the plugin**
-   - Right-click your .uproject file
-   - Generate Visual Studio project files
-   - Open solution (`.sln)
-   - Build with your target platform and output settings
+## Python Server Setup
 
-### Python Server Setup
+From [Python](Python):
 
-See [Python/README.md](Python/README.md) for detailed Python setup instructions, including:
-- Setting up your Python environment
-- Running the MCP server
-- Using direct or server-based connections
+```bash
+uv sync
+uv run unreal_mcp_server.py
+```
 
-### Configuring your MCP Client
+The Unreal plugin listens on `127.0.0.1:55557`, and the Python server forwards MCP tool calls to the editor over that TCP bridge.
 
-Use the following JSON for your mcp configuration based on your MCP client.
+## MCP Client Configuration
+
+All clients eventually run the same Python entrypoint:
 
 ```json
 {
@@ -122,7 +93,7 @@ Use the following JSON for your mcp configuration based on your MCP client.
       "command": "uv",
       "args": [
         "--directory",
-        "<path/to/the/folder/PYTHON>",
+        "D:/path/to/versatile-unreal-mcp/Python",
         "run",
         "unreal_mcp_server.py"
       ]
@@ -131,25 +102,109 @@ Use the following JSON for your mcp configuration based on your MCP client.
 }
 ```
 
-An example is found in `mcp.json`
+### Codex
 
-### MCP Configuration Locations
+Add this to `~/.codex/config.toml`:
 
-Depending on which MCP client you're using, the configuration file location will differ:
+```toml
+[mcp_servers.unrealMCP]
+command = "uv"
+args = ["--directory", "D:\\path\\to\\versatile-unreal-mcp\\Python", "run", "unreal_mcp_server.py"]
+```
 
-| MCP Client | Configuration File Location | Notes |
-|------------|------------------------------|-------|
-| Claude Desktop | `~/.config/claude-desktop/mcp.json` | On Windows: `%USERPROFILE%\.config\claude-desktop\mcp.json` |
-| Cursor | `.cursor/mcp.json` | Located in your project root directory |
-| Windsurf | `~/.config/windsurf/mcp.json` | On Windows: `%USERPROFILE%\.config\windsurf\mcp.json` |
+### OpenCode
 
-Each client uses the same JSON format as shown in the example above. 
-Simply place the configuration in the appropriate location for your MCP client.
+You can configure OpenCode globally in `~/.config/opencode/opencode.json` or per-project with `opencode.json` in the workspace root:
 
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "unrealMCP": {
+      "type": "local",
+      "command": [
+        "uv",
+        "--directory",
+        "D:/path/to/versatile-unreal-mcp/Python",
+        "run",
+        "unreal_mcp_server.py"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Other clients
+
+- Claude Desktop: `~/.config/claude-desktop/mcp.json`
+- Cursor: `.cursor/mcp.json` in the workspace
+- Windsurf: `~/.config/windsurf/mcp.json`
+
+Use the same `uv --directory ... run unreal_mcp_server.py` command pattern.
+
+## Material Tools
+
+This fork adds editor-side material creation and graph editing support.
+
+Available material commands:
+
+- `create_material`
+- `set_material_properties`
+- `add_material_expression`
+- `set_material_expression_property`
+- `connect_material_expressions`
+- `connect_material_property`
+- `recompile_material`
+- `configure_glass_material`
+
+### Example workflows
+
+- Create a new material asset under `/Game/Project/Test/M_Chrome`
+- Build a reusable glass material in `/Game/Project/Test/Glass`
+- Add scalar/vector expressions and wire them to `BaseColor`, `Opacity`, `Roughness`, `Specular`, or `Refraction`
+- Recompile and save the material, then assign it to a mesh or Blueprint component
+
+### Glass preset
+
+`configure_glass_material` creates a practical glass graph using:
+
+- `Translucent` blend mode
+- `Default Lit` shading model
+- `Surface ForwardShading` translucency lighting
+- `Index Of Refraction` refraction mode
+- Fresnel-driven opacity shaping
+- Adjustable tint, roughness, specular, opacity, and IOR
+
+This is meant for Unreal Editor authoring workflows and rapid iteration.
+
+## Compatibility Notes
+
+- The current material tools are intended for `Editor` workflows, not packaged runtime gameplay systems.
+- This repository has been validated on `UE 5.7`.
+- The plugin still targets `UE 5.5+`, but if Epic changes editor-only APIs again, additional compatibility fixes may be required.
+- Unsaved Unreal assets created in-editor can still disappear after editor restart if the asset package or level is not saved.
+
+## Verification Performed
+
+This fork has been exercised end-to-end with:
+
+- plugin build success in Unreal Engine `5.7`
+- Python MCP server registration and tool exposure
+- Blueprint creation and spawning
+- material creation through `create_material`
+- glass graph generation through `configure_glass_material`
+- assigning the generated material to a sphere in a test level
+
+## Development Notes
+
+- The Unreal plugin is the source of truth for editor-side behavior.
+- The Python server is only the MCP-facing wrapper layer.
+- When you add new plugin commands, remember to:
+  - route them in `UnrealMCPBridge`
+  - register a matching Python tool
+  - document the capability in this README or `Docs`
 
 ## License
+
 MIT
-
-## Questions
-
-For questions, you can reach me on X/Twitter: [@chongdashu](https://www.x.com/chongdashu)

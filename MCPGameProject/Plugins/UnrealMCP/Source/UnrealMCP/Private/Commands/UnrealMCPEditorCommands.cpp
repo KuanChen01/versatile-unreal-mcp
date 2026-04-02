@@ -417,18 +417,32 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Blueprint name is empty"));
     }
 
-    FString Root      = TEXT("/Game/Blueprints/");
-    FString AssetPath = Root + BlueprintName;
-
-    if (!FPackageName::DoesPackageExist(AssetPath))
+    FString AssetPath = BlueprintName;
+    if (!AssetPath.StartsWith(TEXT("/Game/")))
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint '%s' not found – it must reside under /Game/Blueprints"), *BlueprintName));
+        AssetPath = TEXT("/Game/Blueprints/") + BlueprintName;
     }
 
-    UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
+    FString ObjectPath = AssetPath;
+    const int32 LastSlashIndex = AssetPath.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+    const FString AssetLeafName = LastSlashIndex != INDEX_NONE ? AssetPath.Mid(LastSlashIndex + 1) : AssetPath;
+    if (!AssetPath.Contains(TEXT(".")))
+    {
+        ObjectPath = FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetLeafName);
+    }
+
+    UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *ObjectPath);
     if (!Blueprint)
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+        Blueprint = FindObject<UBlueprint>(nullptr, *ObjectPath);
+    }
+    if (!Blueprint && !BlueprintName.StartsWith(TEXT("/Game/")))
+    {
+        Blueprint = FUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    }
+    if (!Blueprint)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint '%s' not found – it must reside under /Game/Blueprints"), *BlueprintName));
     }
 
     // Get transform parameters

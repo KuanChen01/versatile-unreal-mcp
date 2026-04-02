@@ -54,6 +54,7 @@
 #include "Commands/UnrealMCPEditorCommands.h"
 #include "Commands/UnrealMCPBlueprintCommands.h"
 #include "Commands/UnrealMCPBlueprintNodeCommands.h"
+#include "Commands/UnrealMCPMaterialCommands.h"
 #include "Commands/UnrealMCPProjectCommands.h"
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "Commands/UnrealMCPUMGCommands.h"
@@ -67,6 +68,7 @@ UUnrealMCPBridge::UUnrealMCPBridge()
     EditorCommands = MakeShared<FUnrealMCPEditorCommands>();
     BlueprintCommands = MakeShared<FUnrealMCPBlueprintCommands>();
     BlueprintNodeCommands = MakeShared<FUnrealMCPBlueprintNodeCommands>();
+    MaterialCommands = MakeShared<FUnrealMCPMaterialCommands>();
     ProjectCommands = MakeShared<FUnrealMCPProjectCommands>();
     UMGCommands = MakeShared<FUnrealMCPUMGCommands>();
 }
@@ -76,6 +78,7 @@ UUnrealMCPBridge::~UUnrealMCPBridge()
     EditorCommands.Reset();
     BlueprintCommands.Reset();
     BlueprintNodeCommands.Reset();
+    MaterialCommands.Reset();
     ProjectCommands.Reset();
     UMGCommands.Reset();
 }
@@ -267,6 +270,18 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             else if (CommandType == TEXT("create_input_mapping"))
             {
                 ResultJson = ProjectCommands->HandleCommand(CommandType, Params);
+            }
+            // Material Commands
+            else if (CommandType == TEXT("create_material") ||
+                     CommandType == TEXT("set_material_properties") ||
+                     CommandType == TEXT("add_material_expression") ||
+                     CommandType == TEXT("set_material_expression_property") ||
+                     CommandType == TEXT("connect_material_expressions") ||
+                     CommandType == TEXT("connect_material_property") ||
+                     CommandType == TEXT("recompile_material") ||
+                     CommandType == TEXT("configure_glass_material"))
+            {
+                ResultJson = MaterialCommands->HandleCommand(CommandType, Params);
             }
             // UMG Commands
             else if (CommandType == TEXT("create_umg_widget_blueprint") ||
