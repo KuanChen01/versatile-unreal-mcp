@@ -337,11 +337,19 @@ def info():
     ## Material Management
     - `create_material(material_path)` - Create a material asset
     - `set_material_properties(material_path, properties)` - Set material asset properties
-    - `add_material_expression(material_path, expression_type, expression_name="", position=[0,0], properties={})` - Add a material node
-    - `set_material_expression_property(material_path, expression, property_name, property_value)` - Edit a material node property
-    - `connect_material_expressions(material_path, from_expression, to_expression, from_output_name="", to_input_name="")` - Connect two nodes
-    - `connect_material_property(material_path, expression, property_name, from_output_name="")` - Connect a node to the material root
+    - `add_material_expression(material_path, expression_type, ..., defer_compile=True, defer_save=True)` - Add a material node and return stable object path/GUID refs
+    - `set_material_expression_property(material_path, expression, property_name, property_value, expression_ref={...})` - Edit a material node property by name, object path, or GUID
+    - `connect_material_expressions(material_path, from_expression, to_expression, source_ref={...}, target_ref={...})` - Connect two nodes using stable refs when available
+    - `connect_material_property(material_path, expression, property_name, expression_ref={...})` - Connect a node to the material root
     - `recompile_material(material_path)` - Recompile and save a material
+    - `rebuild_material_graph(material_path, graph_spec)` - Atomically rebuild a graph from nodes, connections, comments, reroutes, layout, validation, compile, and save options
+    - `get_material_compile_status(material_path)` - Return shader compile errors, error nodes, and material statistics
+    - `validate_material_graph(material_path)` - Validate root outputs, required inputs, ComponentMask nodes, and compile errors
+    - `reload_asset_from_disk(asset_path, close_editors=False, fail_if_dirty=True)` - Reload an asset package from disk safely
+    - `close_asset_editor(asset_path)` - Close open asset editors for an asset
+    - `is_asset_loaded_dirty(asset_path)` - Check whether an asset is currently loaded, dirty, or open
+    - `create_material_function(function_path)` - Create a reusable Material Function
+    - `rebuild_material_function_graph(function_path, graph_spec)` - Rebuild a Material Function graph for reuse
     - `configure_glass_material(material_path, ...)` - Build a realistic glass preset
     
     ## Project Tools

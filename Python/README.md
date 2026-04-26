@@ -1,6 +1,6 @@
-# Unreal MCP
+# Unreal MCP Python Server
 
-Python bridge for interacting with Unreal Engine 5.5 using the Model Context Protocol (MCP).
+Python bridge for interacting with Unreal Engine 5.5+ using the Model Context Protocol (MCP). This server is reusable across projects that have the `UnrealMCP` editor plugin installed.
 
 ## Setup
 
@@ -21,7 +21,11 @@ Python bridge for interacting with Unreal Engine 5.5 using the Model Context Pro
    uv pip install -e .
    ```
 
-At this point, you can configure your MCP Client (Claude Desktop, Cursor, Windsurf) to use the Unreal MCP Server as per the [Configuring your MCP Client](README.md#configuring-your-mcp-client).
+At this point, you can configure your MCP Client to run:
+
+```bash
+uv --directory /path/to/versatile-unreal-mcp/Python run unreal_mcp_server.py
+```
 
 ## Testing Scripts
 
@@ -37,4 +41,4 @@ You should make sure you have installed dependencies and/or are running in the `
 
 ## Development
 
-To add new tools, modify the `UnrealMCPBridge.py` file to add new command handlers, and update the `unreal_mcp_server.py` file to expose them through the HTTP API. 
+To add new tools, route the command in the Unreal plugin bridge, add the C++ handler, then expose the matching MCP wrapper in `tools/*.py`.

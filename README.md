@@ -30,7 +30,7 @@ Validated in practice on Unreal Engine `5.7`, while still targeting `5.5+`.
 | Actor Management | List actors, find actors by name, spawn actors, delete actors, move and rotate actors, inspect actor properties |
 | Blueprint Authoring | Create Blueprints, add components, set mesh and physics properties, compile, set defaults, spawn Blueprint actors |
 | Blueprint Graph Editing | Add event nodes, input nodes, function nodes, self/component references, variables, and connect graph pins |
-| Material Authoring | Create materials, edit material properties, add expressions, connect expressions, connect root material properties, recompile materials, build a realistic glass preset |
+| Material Authoring | Create materials, rebuild material graphs atomically, use stable node refs, validate/compile graphs, manage asset cache state, create/reuse Material Functions, build glass/chrome workflows |
 | UMG Authoring | Create widget Blueprints, add text blocks and buttons, bind widget events, add widgets to viewport |
 | Editor Utilities | Focus the viewport and take screenshots |
 
@@ -145,7 +145,7 @@ Use the same `uv --directory ... run unreal_mcp_server.py` command pattern.
 
 ## Material Tools
 
-This fork adds editor-side material creation and graph editing support.
+This fork adds editor-side material creation and graph editing support. For non-trivial graphs, prefer `rebuild_material_graph` over incremental add/connect calls so the graph is rebuilt, validated, compiled, and saved as one unit.
 
 Available material commands:
 
@@ -156,14 +156,97 @@ Available material commands:
 - `connect_material_expressions`
 - `connect_material_property`
 - `recompile_material`
+- `rebuild_material_graph`
+- `get_material_compile_status`
+- `validate_material_graph`
+- `reload_asset_from_disk`
+- `close_asset_editor`
+- `is_asset_loaded_dirty`
+- `create_material_function`
+- `rebuild_material_function_graph`
 - `configure_glass_material`
 
-### Example workflows
+### Batch graph workflow
 
-- Create a new material asset under `/Game/Project/Test/M_Chrome`
-- Build a reusable glass material in `/Game/Project/Test/Glass`
-- Add scalar/vector expressions and wire them to `BaseColor`, `Opacity`, `Roughness`, `Specular`, or `Refraction`
-- Recompile and save the material, then assign it to a mesh or Blueprint component
+`rebuild_material_graph(material_path, graph_spec)` is the preferred API for complex material authoring. It can clear the old graph, create nodes, create comment boxes and reroute nodes, connect by local ids, group/layout the graph, compile, validate, and save.
+
+The operation is designed to avoid saving partial products. The hard guarantee is that failures do not write the half-built graph to disk; the plugin also attempts to restore the in-memory Editor graph from a transient backup.
+
+Minimal chrome-like example:
+
+```json
+{
+  "version": 1,
+  "material_properties": {
+    "blend_mode": "Opaque",
+    "shading_model": "DefaultLit",
+    "two_sided": false
+  },
+  "groups": ["Surface"],
+  "nodes": [
+    {
+      "id": "base_color",
+      "type": "Constant3Vector",
+      "label": "Chrome tint",
+      "group": "Surface",
+      "properties": { "Constant": [0.8, 0.82, 0.84, 1.0] }
+    },
+    {
+      "id": "metallic",
+      "type": "Constant",
+      "label": "Metallic",
+      "group": "Surface",
+      "properties": { "R": 1.0 }
+    },
+    {
+      "id": "roughness",
+      "type": "Constant",
+      "label": "Polished roughness",
+      "group": "Surface",
+      "properties": { "R": 0.08 }
+    }
+  ],
+  "comments": [
+    { "id": "surface_comment", "text": "Surface response", "group": "Surface" }
+  ],
+  "connections": [
+    { "from": { "node": "base_color" }, "to": { "material_property": "BaseColor" } },
+    { "from": { "node": "metallic" }, "to": { "material_property": "Metallic" } },
+    { "from": { "node": "roughness" }, "to": { "material_property": "Roughness" } }
+  ],
+  "options": {
+    "compile": true,
+    "save": true,
+    "validate_before_save": true
+  }
+}
+```
+
+Created expression responses include `object_path`, `expression_guid`, `stable_id`, `name`, `label`, `type`, and `position`. Incremental connect tools accept `source_ref`, `target_ref`, and `expression_ref` objects so callers can connect by `object_path` or `expression_guid` instead of relying on duplicate-prone labels.
+
+Incremental `add_material_expression`, `set_material_expression_property`, `connect_material_expressions`, and `connect_material_property` default to `defer_compile=true` and `defer_save=true`. Call `recompile_material` after a batch, or pass `defer_compile=false` / `defer_save=false` when you explicitly want old step-by-step behavior.
+
+### Validation and cache tools
+
+- `get_material_compile_status` reports shader compile errors, error node refs, shader platform, and material statistics.
+- `validate_material_graph` checks required expression inputs, root material output connections, illegal empty `ComponentMask` nodes, and compile errors.
+- `is_asset_loaded_dirty`, `close_asset_editor`, and `reload_asset_from_disk` help avoid stale Editor-loaded assets overwriting externally changed `.uasset` files.
+- `reload_asset_from_disk` refuses dirty packages by default; pass `fail_if_dirty=false` only when losing unsaved in-memory edits is acceptable.
+
+### Material Functions
+
+Use `create_material_function` and `rebuild_material_function_graph` to package reusable subgraphs. A material graph can reuse an existing function with a node like:
+
+```json
+{
+  "id": "shared_falloff",
+  "type": "MaterialFunctionCall",
+  "function_path": "/Game/Materials/MF_EdgeFalloff",
+  "group": "Reuse"
+}
+```
+
+For large graphs, split the spec into semantic groups, add comment boxes, use reroute nodes where wires cross, and move repeated logic into Material Functions instead of creating a single dense node cluster.
 
 ### Glass preset
 

@@ -5,7 +5,7 @@ This module provides tools for creating and editing Unreal Engine materials.
 """
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
 logger = logging.getLogger("UnrealMCP")
@@ -56,15 +56,20 @@ def register_material_tools(mcp: FastMCP):
         material_path: str,
         expression_type: str,
         expression_name: str = "",
-        position: List[float] = [],
-        properties: Dict[str, Any] = {},
-        selected_asset: str = ""
+        position: Optional[List[float]] = None,
+        properties: Optional[Dict[str, Any]] = None,
+        selected_asset: str = "",
+        function_path: str = "",
+        defer_compile: bool = True,
+        defer_save: bool = True
     ) -> Dict[str, Any]:
         """Add a material expression node to a material graph."""
         params: Dict[str, Any] = {
             "material_path": material_path,
             "expression_type": expression_type,
             "position": position or [0.0, 0.0],
+            "defer_compile": defer_compile,
+            "defer_save": defer_save,
         }
 
         if expression_name:
@@ -73,6 +78,8 @@ def register_material_tools(mcp: FastMCP):
             params["properties"] = properties
         if selected_asset:
             params["selected_asset"] = selected_asset
+        if function_path:
+            params["function_path"] = function_path
 
         return _send_material_command("add_material_expression", params)
 
@@ -83,13 +90,22 @@ def register_material_tools(mcp: FastMCP):
         expression: str,
         property_name: str = "",
         property_value=None,
-        properties: Dict[str, Any] = {}
+        properties: Optional[Dict[str, Any]] = None,
+        expression_ref: Optional[Dict[str, Any]] = None,
+        defer_compile: bool = True,
+        defer_save: bool = True
     ) -> Dict[str, Any]:
         """Set one or more properties on a material expression node."""
         params: Dict[str, Any] = {
             "material_path": material_path,
-            "expression": expression,
+            "defer_compile": defer_compile,
+            "defer_save": defer_save,
         }
+
+        if expression_ref:
+            params["expression_ref"] = expression_ref
+        else:
+            params["expression"] = expression
 
         if properties:
             params["properties"] = properties
@@ -106,14 +122,27 @@ def register_material_tools(mcp: FastMCP):
         from_expression: str,
         to_expression: str,
         from_output_name: str = "",
-        to_input_name: str = ""
+        to_input_name: str = "",
+        source_ref: Optional[Dict[str, Any]] = None,
+        target_ref: Optional[Dict[str, Any]] = None,
+        defer_compile: bool = True,
+        defer_save: bool = True
     ) -> Dict[str, Any]:
         """Connect two material expressions."""
         params: Dict[str, Any] = {
             "material_path": material_path,
-            "from_expression": from_expression,
-            "to_expression": to_expression,
+            "defer_compile": defer_compile,
+            "defer_save": defer_save,
         }
+
+        if source_ref:
+            params["source_ref"] = source_ref
+        else:
+            params["from_expression"] = from_expression
+        if target_ref:
+            params["target_ref"] = target_ref
+        else:
+            params["to_expression"] = to_expression
 
         if from_output_name:
             params["from_output_name"] = from_output_name
@@ -128,14 +157,23 @@ def register_material_tools(mcp: FastMCP):
         material_path: str,
         expression: str,
         property_name: str,
-        from_output_name: str = ""
+        from_output_name: str = "",
+        expression_ref: Optional[Dict[str, Any]] = None,
+        defer_compile: bool = True,
+        defer_save: bool = True
     ) -> Dict[str, Any]:
         """Connect a material expression output to a material root property."""
         params: Dict[str, Any] = {
             "material_path": material_path,
-            "expression": expression,
             "property_name": property_name,
+            "defer_compile": defer_compile,
+            "defer_save": defer_save,
         }
+
+        if expression_ref:
+            params["expression_ref"] = expression_ref
+        else:
+            params["expression"] = expression
 
         if from_output_name:
             params["from_output_name"] = from_output_name
@@ -151,10 +189,98 @@ def register_material_tools(mcp: FastMCP):
         return _send_material_command("recompile_material", {"material_path": material_path})
 
     @mcp.tool()
+    def rebuild_material_graph(
+        ctx: Context,
+        material_path: str,
+        graph_spec: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Atomically rebuild a material graph from a declarative graph spec."""
+        return _send_material_command("rebuild_material_graph", {
+            "material_path": material_path,
+            "graph_spec": graph_spec,
+        })
+
+    @mcp.tool()
+    def get_material_compile_status(
+        ctx: Context,
+        material_path: str
+    ) -> Dict[str, Any]:
+        """Return shader compile errors, error nodes, and material statistics."""
+        return _send_material_command("get_material_compile_status", {
+            "material_path": material_path,
+        })
+
+    @mcp.tool()
+    def validate_material_graph(
+        ctx: Context,
+        material_path: str
+    ) -> Dict[str, Any]:
+        """Validate material graph connectivity, root outputs, ComponentMask nodes, and compile errors."""
+        return _send_material_command("validate_material_graph", {
+            "material_path": material_path,
+        })
+
+    @mcp.tool()
+    def reload_asset_from_disk(
+        ctx: Context,
+        asset_path: str,
+        close_editors: bool = False,
+        fail_if_dirty: bool = True
+    ) -> Dict[str, Any]:
+        """Reload an asset package from disk, optionally closing open asset editors first."""
+        return _send_material_command("reload_asset_from_disk", {
+            "asset_path": asset_path,
+            "close_editors": close_editors,
+            "fail_if_dirty": fail_if_dirty,
+        })
+
+    @mcp.tool()
+    def close_asset_editor(
+        ctx: Context,
+        asset_path: str
+    ) -> Dict[str, Any]:
+        """Close all open Unreal asset editors for the supplied asset."""
+        return _send_material_command("close_asset_editor", {
+            "asset_path": asset_path,
+        })
+
+    @mcp.tool()
+    def is_asset_loaded_dirty(
+        ctx: Context,
+        asset_path: str
+    ) -> Dict[str, Any]:
+        """Report whether an asset is loaded, dirty, and open in asset editors."""
+        return _send_material_command("is_asset_loaded_dirty", {
+            "asset_path": asset_path,
+        })
+
+    @mcp.tool()
+    def create_material_function(
+        ctx: Context,
+        function_path: str
+    ) -> Dict[str, Any]:
+        """Create a new Material Function asset at a /Game path."""
+        return _send_material_command("create_material_function", {
+            "function_path": function_path,
+        })
+
+    @mcp.tool()
+    def rebuild_material_function_graph(
+        ctx: Context,
+        function_path: str,
+        graph_spec: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Rebuild a Material Function expression graph from a declarative graph spec."""
+        return _send_material_command("rebuild_material_function_graph", {
+            "function_path": function_path,
+            "graph_spec": graph_spec,
+        })
+
+    @mcp.tool()
     def configure_glass_material(
         ctx: Context,
         material_path: str,
-        tint: List[float] = [],
+        tint: Optional[List[float]] = None,
         roughness: float = 0.02,
         specular: float = 0.5,
         base_opacity: float = 0.08,

@@ -279,7 +279,15 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("connect_material_expressions") ||
                      CommandType == TEXT("connect_material_property") ||
                      CommandType == TEXT("recompile_material") ||
-                     CommandType == TEXT("configure_glass_material"))
+                     CommandType == TEXT("configure_glass_material") ||
+                     CommandType == TEXT("rebuild_material_graph") ||
+                     CommandType == TEXT("get_material_compile_status") ||
+                     CommandType == TEXT("validate_material_graph") ||
+                     CommandType == TEXT("reload_asset_from_disk") ||
+                     CommandType == TEXT("close_asset_editor") ||
+                     CommandType == TEXT("is_asset_loaded_dirty") ||
+                     CommandType == TEXT("create_material_function") ||
+                     CommandType == TEXT("rebuild_material_function_graph"))
             {
                 ResultJson = MaterialCommands->HandleCommand(CommandType, Params);
             }
