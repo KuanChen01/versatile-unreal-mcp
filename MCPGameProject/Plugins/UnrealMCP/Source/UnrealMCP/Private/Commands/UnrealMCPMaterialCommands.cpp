@@ -21,8 +21,10 @@
 #include "Materials/MaterialExpressionReroute.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialFunctionInterface.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/PackageName.h"
 #include "PackageTools.h"
+#include "RHIFeatureLevel.h"
 #include "RHIShaderPlatform.h"
 #include "SceneTypes.h"
 #include "Subsystems/AssetEditorSubsystem.h"
@@ -150,6 +152,20 @@ namespace
         Result.ReplaceInline(TEXT("-"), TEXT(""));
         Result.ReplaceInline(TEXT("_"), TEXT(""));
         return Result.ToLower();
+    }
+
+    static FMaterialResource* GetMaterialResourceForInspection(UMaterial* Material)
+    {
+        if (!Material)
+        {
+            return nullptr;
+        }
+
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+        return Material->GetMaterialResource(GMaxRHIFeatureLevel);
+#else
+        return Material->GetMaterialResource(GMaxRHIShaderPlatform);
+#endif
     }
 
     static bool TryGetNumericValue(const TSharedPtr<FJsonValue>& Value, double& OutValue)
@@ -386,8 +402,10 @@ namespace
             { TEXT("2doffset"), RM_2DOffset },
             { TEXT("rmpixelnormaloffset"), RM_PixelNormalOffset },
             { TEXT("pixelnormaloffset"), RM_PixelNormalOffset },
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
             { TEXT("rmindexofrefractionfromf0"), RM_IndexOfRefractionFromF0 },
             { TEXT("indexofrefractionfromf0"), RM_IndexOfRefractionFromF0 }
+#endif
         };
 
         for (const FRefractionModeEntry& Entry : Entries)
@@ -1367,7 +1385,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::GetMaterialCompileStatus(UMa
         return StatusObject;
     }
 
-    FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatform);
+    FMaterialResource* Resource = GetMaterialResourceForInspection(Material);
     TArray<FString> CompileErrors;
     TArray<TSharedPtr<FJsonValue>> ErrorNodes;
 

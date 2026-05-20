@@ -1,0 +1,5 @@
+*
+!.gitignore
+!README.md
+!SHA256SUMS.txt
+!*.zip
