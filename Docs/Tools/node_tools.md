@@ -142,30 +142,6 @@ Add a variable to a Blueprint.
 }
 ```
 
-### create_input_mapping
-
-Create an input mapping for the project.
-
-**Parameters:**
-- `action_name` (string) - Name of the input action
-- `key` (string) - Key to bind (SpaceBar, LeftMouseButton, etc.)
-- `input_type` (string, optional) - Type of input mapping (Action or Axis, default: "Action")
-
-**Returns:**
-- Response indicating success or failure
-
-**Example:**
-```json
-{
-  "command": "create_input_mapping",
-  "params": {
-    "action_name": "Jump",
-    "key": "SpaceBar",
-    "input_type": "Action"
-  }
-}
-```
-
 ### add_blueprint_get_self_component_reference
 
 Add a node that gets a reference to a component owned by the current Blueprint.

@@ -27,12 +27,13 @@ Validated in practice on Unreal Engine `5.7`, while still targeting `5.5+`.
 
 | Area | What it can do |
 | --- | --- |
-| Actor Management | List actors, find actors by name, spawn actors, delete actors, move and rotate actors, inspect actor properties |
+| Actor Management | List/find actors, spawn built-in or **by class/Blueprint**, delete, transform, properties, **assign material to mesh slots** |
+| Asset Registry | **find_assets**, get_asset_info, delete_asset (Content Browser search) |
 | Blueprint Authoring | Create Blueprints, add components, set mesh and physics properties, compile, set defaults, spawn Blueprint actors |
 | Blueprint Graph Editing | Add event nodes, input nodes, function nodes, self/component references, variables, and connect graph pins |
 | Material Authoring | Create materials, rebuild material graphs atomically, use stable node refs, validate/compile graphs, manage asset cache state, create/reuse Material Functions, build glass/chrome workflows |
 | UMG Authoring | Create widget Blueprints, add text blocks and buttons, bind widget events, add widgets to viewport |
-| Editor Utilities | Focus the viewport and take screenshots |
+| Editor Utilities | Inspect live bridge/editor status, manage levels and play sessions, query viewport readiness, capture logs, focus the viewport, and take screenshots |
 
 ## Repository Layout
 
@@ -59,7 +60,7 @@ Validated in practice on Unreal Engine `5.7`, while still targeting `5.5+`.
 1. Open [MCPGameProject](MCPGameProject).
 2. Generate project files for the `.uproject`.
 3. Build the `Development Editor` target.
-4. Start the editor, then run the Python MCP server from [Python](D:\MCP\Unreal\Python).
+4. Start the editor, then run the Python MCP server from the repository's [Python](Python) directory.
 
 ### Option B: Reuse in your own Unreal project
 
@@ -67,7 +68,7 @@ Validated in practice on Unreal Engine `5.7`, while still targeting `5.5+`.
 2. Enable the plugin in Unreal Editor if it is not already enabled.
 3. Generate project files for your `.uproject`.
 4. Build your Editor target so the plugin is compiled against that project.
-5. Run the shared Python MCP server from [Python](D:\MCP\Unreal\Python).
+5. Run the shared Python MCP server from the repository's [Python](Python) directory.
 
 This reuse model is the intended workflow. The plugin changes in this repository are not tied to any single project path or asset set.
 
@@ -80,11 +81,22 @@ uv sync
 uv run unreal_mcp_server.py
 ```
 
-The Unreal plugin listens on `127.0.0.1:55557`, and the Python server forwards MCP tool calls to the editor over that TCP bridge.
+The Unreal plugin listens on `127.0.0.1:55557` by default, and the Python server forwards MCP tool calls to the editor over that TCP bridge.
+
+Multi-instance (optional): set the same `UNREAL_MCP_PORT` (and optionally `UNREAL_MCP_HOST`) environment variable for both the Unreal Editor process and the Python MCP server before launch.
+
+### Bridge protocol 2.0 (breaking)
+
+Python and the editor plugin speak **protocol 2.0**: each message is a little-endian `uint32` byte length followed by a UTF-8 JSON body. They must be upgraded **together**. An old plugin with a new Python server (or the reverse) will fail framing with an explicit upgrade hint.
+
+- Constants: `Python/bridge_protocol.py` (`PROTOCOL_VERSION = "2.0"`) and plugin `UnrealMCPProtocolVersion`
+- Offline framing tests: `uv run python tests/test_bridge_protocol.py` (from `Python/`)
 
 ## MCP Client Configuration
 
 All clients eventually run the same Python entrypoint:
+
+Replace the path below with the absolute path to this repository's `Python` directory.
 
 ```json
 {
@@ -93,7 +105,7 @@ All clients eventually run the same Python entrypoint:
       "command": "uv",
       "args": [
         "--directory",
-        "D:/path/to/versatile-unreal-mcp/Python",
+        "/absolute/path/to/versatile-unreal-mcp/Python",
         "run",
         "unreal_mcp_server.py"
       ]
@@ -109,7 +121,7 @@ Add this to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.unrealMCP]
 command = "uv"
-args = ["--directory", "D:\\path\\to\\versatile-unreal-mcp\\Python", "run", "unreal_mcp_server.py"]
+args = ["--directory", "/absolute/path/to/versatile-unreal-mcp/Python", "run", "unreal_mcp_server.py"]
 ```
 
 ### OpenCode
@@ -125,7 +137,7 @@ You can configure OpenCode globally in `~/.config/opencode/opencode.json` or per
       "command": [
         "uv",
         "--directory",
-        "D:/path/to/versatile-unreal-mcp/Python",
+        "/absolute/path/to/versatile-unreal-mcp/Python",
         "run",
         "unreal_mcp_server.py"
       ],
@@ -267,6 +279,7 @@ This is meant for Unreal Editor authoring workflows and rapid iteration.
 - This repository has been validated on `UE 5.7`.
 - The plugin still targets `UE 5.5+`, but if Epic changes editor-only APIs again, additional compatibility fixes may be required.
 - Unsaved Unreal assets created in-editor can still disappear after editor restart if the asset package or level is not saved.
+- After pulling protocol 2.0 changes, rebuild/reload the `UnrealMCP` plugin in every target project before using the shared Python server. Prebuilt packages under `Releases/` must be regenerated from the updated plugin source before redistribution.
 
 ## Verification Performed
 
@@ -278,6 +291,11 @@ This fork has been exercised end-to-end with:
 - material creation through `create_material`
 - glass graph generation through `configure_glass_material`
 - assigning the generated material to a sphere in a test level
+- **editor smoke suite** (`Python/scripts/smoke/editor_smoke.py`): bridge/protocol gate, spawn+screenshot, material rebuild/validate, blueprint compile, unknown-command rewrite (live `OW_CarScene_57` / UE 5.7)
+
+```bash
+uv --directory Python run python scripts/smoke/editor_smoke.py
+```
 
 ## Development Notes
 
