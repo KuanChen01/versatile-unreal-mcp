@@ -33,6 +33,25 @@ There are several scripts in the [scripts](./scripts) folder. They are useful fo
 
 You should make sure you have installed dependencies and/or are running in the `uv` virtual environment in order for the scripts to work.
 
+### Editor smoke suite (recommended after plugin upgrades)
+
+With Unreal Editor running and UnrealMCP listening on `127.0.0.1:55557`:
+
+```bash
+uv run python scripts/smoke/editor_smoke.py
+```
+
+See [scripts/smoke/README.md](./scripts/smoke/README.md). Exit `0` = pass, `1` = case failure, `2` = connect/handshake failure.
+
+Offline unit tests (no Editor required):
+
+```bash
+uv run python tests/test_bridge_protocol.py
+uv run python tests/test_bridge_client.py
+uv run python tests/test_protocol_handshake.py
+```
+
+
 
 ## Troubleshooting
 
