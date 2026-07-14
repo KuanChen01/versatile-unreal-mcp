@@ -18,5 +18,4 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-# The main server script is a single-file module
-py-modules = ["unreal_mcp_server"] 
+py-modules = ["unreal_mcp_server", "bridge_protocol", "bridge_client"]

@@ -15,18 +15,9 @@ def register_material_tools(mcp: FastMCP):
     """Register material tools with the MCP server."""
 
     def _send_material_command(command: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        from unreal_mcp_server import get_unreal_connection
+        from bridge_client import run_bridge_command
 
-        unreal = get_unreal_connection()
-        if not unreal:
-            logger.error("Failed to connect to Unreal Engine")
-            return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-        response = unreal.send_command(command, params)
-        if not response:
-            logger.error("No response from Unreal Engine")
-            return {"success": False, "message": "No response from Unreal Engine"}
-
+        response = run_bridge_command(command, params)
         logger.info("Material command %s response: %s", command, response)
         return response
 
