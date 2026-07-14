@@ -41,6 +41,8 @@ public:
 	void StartServer();
 	void StopServer();
 	bool IsRunning() const { return bIsRunning; }
+	uint16 GetPort() const { return Port; }
+	FString GetListenHost() const { return ServerAddress.ToString(); }
 
 	// Command execution
 	FString ExecuteCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params);

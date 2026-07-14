@@ -4,17 +4,18 @@
 #include "Json.h"
 
 /**
- * Handler class for Project-wide MCP commands
+ * Handler class for Project-wide MCP commands (input, assets).
  */
 class UNREALMCP_API FUnrealMCPProjectCommands
 {
 public:
-    FUnrealMCPProjectCommands();
+	FUnrealMCPProjectCommands();
 
-    // Handle project commands
-    TSharedPtr<FJsonObject> HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params);
 
 private:
-    // Specific project command handlers
-    TSharedPtr<FJsonObject> HandleCreateInputMapping(const TSharedPtr<FJsonObject>& Params);
-}; 
+	TSharedPtr<FJsonObject> HandleCreateInputMapping(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleFindAssets(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleGetAssetInfo(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> HandleDeleteAsset(const TSharedPtr<FJsonObject>& Params);
+};

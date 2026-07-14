@@ -10,6 +10,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonWriter.h"
+#include "Editor.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/PointLight.h"
@@ -50,6 +51,7 @@
 #include "GameFramework/InputSettings.h"
 #include "EditorSubsystem.h"
 #include "Subsystems/EditorActorSubsystem.h"
+#include "Interfaces/IPluginManager.h"
 // Include our new command handler classes
 #include "Commands/UnrealMCPEditorCommands.h"
 #include "Commands/UnrealMCPBlueprintCommands.h"
@@ -62,6 +64,194 @@
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
 #define MCP_SERVER_PORT 55557
+
+namespace
+{
+    // Must match Python bridge_protocol.PROTOCOL_VERSION (length-prefixed frames).
+    const FString UnrealMCPProtocolVersion = TEXT("2.0");
+
+    const TArray<FString>& GetEditorCommandTypes()
+    {
+        static const TArray<FString> CommandTypes = {
+            TEXT("get_level_status"),
+            TEXT("open_level"),
+            TEXT("save_current_level"),
+            TEXT("save_dirty_packages"),
+            TEXT("get_play_state"),
+            TEXT("start_pie"),
+            TEXT("stop_pie"),
+            TEXT("get_output_log"),
+            TEXT("get_message_log"),
+            TEXT("get_actors_in_level"),
+            TEXT("find_actors_by_name"),
+            TEXT("spawn_actor"),
+            TEXT("create_actor"),
+            TEXT("spawn_actor_by_class"),
+            TEXT("delete_actor"),
+            TEXT("set_actor_transform"),
+            TEXT("get_actor_properties"),
+            TEXT("set_actor_property"),
+            TEXT("assign_material_to_actor"),
+            TEXT("get_viewport_status"),
+            TEXT("spawn_blueprint_actor"),
+            TEXT("focus_viewport"),
+            TEXT("take_screenshot")
+        };
+        return CommandTypes;
+    }
+
+    const TArray<FString>& GetBlueprintCommandTypes()
+    {
+        static const TArray<FString> CommandTypes = {
+            TEXT("create_blueprint"),
+            TEXT("add_component_to_blueprint"),
+            TEXT("set_component_property"),
+            TEXT("set_physics_properties"),
+            TEXT("compile_blueprint"),
+            TEXT("set_blueprint_property"),
+            TEXT("set_static_mesh_properties"),
+            TEXT("set_pawn_properties")
+        };
+        return CommandTypes;
+    }
+
+    const TArray<FString>& GetBlueprintNodeCommandTypes()
+    {
+        static const TArray<FString> CommandTypes = {
+            TEXT("connect_blueprint_nodes"),
+            TEXT("add_blueprint_get_self_component_reference"),
+            TEXT("add_blueprint_self_reference"),
+            TEXT("find_blueprint_nodes"),
+            TEXT("add_blueprint_event_node"),
+            TEXT("add_blueprint_input_action_node"),
+            TEXT("add_blueprint_function_node"),
+            TEXT("add_blueprint_get_component_node"),
+            TEXT("add_blueprint_variable")
+        };
+        return CommandTypes;
+    }
+
+    const TArray<FString>& GetProjectCommandTypes()
+    {
+        static const TArray<FString> CommandTypes = {
+            TEXT("create_input_mapping"),
+            TEXT("find_assets"),
+            TEXT("get_asset_info"),
+            TEXT("delete_asset")
+        };
+        return CommandTypes;
+    }
+
+    const TArray<FString>& GetMaterialCommandTypes()
+    {
+        static const TArray<FString> CommandTypes = {
+            TEXT("create_material"),
+            TEXT("set_material_properties"),
+            TEXT("add_material_expression"),
+            TEXT("set_material_expression_property"),
+            TEXT("connect_material_expressions"),
+            TEXT("connect_material_property"),
+            TEXT("recompile_material"),
+            TEXT("configure_glass_material"),
+            TEXT("rebuild_material_graph"),
+            TEXT("get_material_compile_status"),
+            TEXT("validate_material_graph"),
+            TEXT("reload_asset_from_disk"),
+            TEXT("close_asset_editor"),
+            TEXT("is_asset_loaded_dirty"),
+            TEXT("create_material_function"),
+            TEXT("rebuild_material_function_graph")
+        };
+        return CommandTypes;
+    }
+
+    const TArray<FString>& GetUMGCommandTypes()
+    {
+        static const TArray<FString> CommandTypes = {
+            TEXT("create_umg_widget_blueprint"),
+            TEXT("add_text_block_to_widget"),
+            TEXT("add_button_to_widget"),
+            TEXT("bind_widget_event"),
+            TEXT("set_text_block_binding"),
+            TEXT("add_widget_to_viewport")
+        };
+        return CommandTypes;
+    }
+
+    bool CommandTypeInGroup(const FString& CommandType, const TArray<FString>& CommandTypes)
+    {
+        return CommandTypes.Contains(CommandType);
+    }
+
+    TArray<TSharedPtr<FJsonValue>> MakeStringArray(const TArray<FString>& Values)
+    {
+        TArray<TSharedPtr<FJsonValue>> JsonArray;
+        JsonArray.Reserve(Values.Num());
+        for (const FString& Value : Values)
+        {
+            JsonArray.Add(MakeShared<FJsonValueString>(Value));
+        }
+        return JsonArray;
+    }
+
+    TSharedPtr<FJsonObject> BuildCommandGroupsObject()
+    {
+        TSharedPtr<FJsonObject> CommandsObject = MakeShared<FJsonObject>();
+        CommandsObject->SetArrayField(TEXT("editor"), MakeStringArray(GetEditorCommandTypes()));
+        CommandsObject->SetArrayField(TEXT("blueprint"), MakeStringArray(GetBlueprintCommandTypes()));
+        CommandsObject->SetArrayField(TEXT("blueprint_nodes"), MakeStringArray(GetBlueprintNodeCommandTypes()));
+        CommandsObject->SetArrayField(TEXT("material"), MakeStringArray(GetMaterialCommandTypes()));
+        CommandsObject->SetArrayField(TEXT("project"), MakeStringArray(GetProjectCommandTypes()));
+        CommandsObject->SetArrayField(TEXT("umg"), MakeStringArray(GetUMGCommandTypes()));
+        return CommandsObject;
+    }
+
+    TSharedPtr<FJsonObject> BuildBridgeStatusObject()
+    {
+        TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
+        ResultObject->SetBoolField(TEXT("success"), true);
+        ResultObject->SetStringField(TEXT("protocol_version"), UnrealMCPProtocolVersion);
+
+        TSharedPtr<FJsonObject> PluginObject = MakeShared<FJsonObject>();
+        PluginObject->SetStringField(TEXT("name"), TEXT("UnrealMCP"));
+
+        const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UnrealMCP"));
+        if (Plugin.IsValid())
+        {
+            PluginObject->SetNumberField(TEXT("version"), Plugin->GetDescriptor().Version);
+            PluginObject->SetStringField(TEXT("version_name"), Plugin->GetDescriptor().VersionName);
+        }
+        else
+        {
+            PluginObject->SetNumberField(TEXT("version"), 0);
+            PluginObject->SetStringField(TEXT("version_name"), TEXT(""));
+        }
+        ResultObject->SetObjectField(TEXT("plugin"), PluginObject);
+
+        TSharedPtr<FJsonObject> EditorObject = MakeShared<FJsonObject>();
+        const bool bConnected = GEditor != nullptr;
+        const bool bHasActiveViewport = bConnected && GEditor->GetActiveViewport() != nullptr;
+        EditorObject->SetBoolField(TEXT("connected"), bConnected);
+        EditorObject->SetBoolField(TEXT("has_active_viewport"), bHasActiveViewport);
+        ResultObject->SetObjectField(TEXT("editor"), EditorObject);
+
+        TSharedPtr<FJsonObject> ListenObject = MakeShared<FJsonObject>();
+        ListenObject->SetStringField(TEXT("host"), MCP_SERVER_HOST);
+        ListenObject->SetNumberField(TEXT("port"), MCP_SERVER_PORT);
+        if (GEditor)
+        {
+            if (UUnrealMCPBridge* Bridge = GEditor->GetEditorSubsystem<UUnrealMCPBridge>())
+            {
+                ListenObject->SetStringField(TEXT("host"), Bridge->GetListenHost());
+                ListenObject->SetNumberField(TEXT("port"), Bridge->GetPort());
+            }
+        }
+        ResultObject->SetObjectField(TEXT("listen"), ListenObject);
+
+        ResultObject->SetObjectField(TEXT("commands"), BuildCommandGroupsObject());
+        return ResultObject;
+    }
+}
 
 UUnrealMCPBridge::UUnrealMCPBridge()
 {
@@ -94,6 +284,39 @@ void UUnrealMCPBridge::Initialize(FSubsystemCollectionBase& Collection)
     ServerThread = nullptr;
     Port = MCP_SERVER_PORT;
     FIPv4Address::Parse(MCP_SERVER_HOST, ServerAddress);
+
+    // Optional multi-instance override: UNREAL_MCP_PORT / UNREAL_MCP_HOST
+    {
+        const FString PortEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("UNREAL_MCP_PORT"));
+        if (!PortEnv.IsEmpty())
+        {
+            const int32 ParsedPort = FCString::Atoi(*PortEnv);
+            if (ParsedPort > 0 && ParsedPort < 65536)
+            {
+                Port = static_cast<uint16>(ParsedPort);
+                UE_LOG(LogTemp, Display, TEXT("UnrealMCPBridge: Using UNREAL_MCP_PORT=%d"), Port);
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("UnrealMCPBridge: Ignoring invalid UNREAL_MCP_PORT=%s"), *PortEnv);
+            }
+        }
+
+        const FString HostEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("UNREAL_MCP_HOST"));
+        if (!HostEnv.IsEmpty())
+        {
+            FIPv4Address ParsedHost;
+            if (FIPv4Address::Parse(HostEnv, ParsedHost))
+            {
+                ServerAddress = ParsedHost;
+                UE_LOG(LogTemp, Display, TEXT("UnrealMCPBridge: Using UNREAL_MCP_HOST=%s"), *HostEnv);
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("UnrealMCPBridge: Ignoring invalid UNREAL_MCP_HOST=%s"), *HostEnv);
+            }
+        }
+    }
 
     // Start the server automatically
     StartServer();
@@ -225,79 +448,39 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             {
                 ResultJson = MakeShareable(new FJsonObject);
                 ResultJson->SetStringField(TEXT("message"), TEXT("pong"));
+                ResultJson->SetStringField(TEXT("protocol_version"), UnrealMCPProtocolVersion);
+            }
+            else if (CommandType == TEXT("get_bridge_status"))
+            {
+                ResultJson = BuildBridgeStatusObject();
             }
             // Editor Commands (including actor manipulation)
-            else if (CommandType == TEXT("get_actors_in_level") || 
-                     CommandType == TEXT("find_actors_by_name") ||
-                     CommandType == TEXT("spawn_actor") ||
-                     CommandType == TEXT("create_actor") ||
-                     CommandType == TEXT("delete_actor") || 
-                     CommandType == TEXT("set_actor_transform") ||
-                     CommandType == TEXT("get_actor_properties") ||
-                     CommandType == TEXT("set_actor_property") ||
-                     CommandType == TEXT("spawn_blueprint_actor") ||
-                     CommandType == TEXT("focus_viewport") || 
-                     CommandType == TEXT("take_screenshot"))
+            else if (CommandTypeInGroup(CommandType, GetEditorCommandTypes()))
             {
                 ResultJson = EditorCommands->HandleCommand(CommandType, Params);
             }
             // Blueprint Commands
-            else if (CommandType == TEXT("create_blueprint") || 
-                     CommandType == TEXT("add_component_to_blueprint") || 
-                     CommandType == TEXT("set_component_property") || 
-                     CommandType == TEXT("set_physics_properties") || 
-                     CommandType == TEXT("compile_blueprint") || 
-                     CommandType == TEXT("set_blueprint_property") || 
-                     CommandType == TEXT("set_static_mesh_properties") ||
-                     CommandType == TEXT("set_pawn_properties"))
+            else if (CommandTypeInGroup(CommandType, GetBlueprintCommandTypes()))
             {
                 ResultJson = BlueprintCommands->HandleCommand(CommandType, Params);
             }
             // Blueprint Node Commands
-            else if (CommandType == TEXT("connect_blueprint_nodes") || 
-                     CommandType == TEXT("add_blueprint_get_self_component_reference") ||
-                     CommandType == TEXT("add_blueprint_self_reference") ||
-                     CommandType == TEXT("find_blueprint_nodes") ||
-                     CommandType == TEXT("add_blueprint_event_node") ||
-                     CommandType == TEXT("add_blueprint_input_action_node") ||
-                     CommandType == TEXT("add_blueprint_function_node") ||
-                     CommandType == TEXT("add_blueprint_get_component_node") ||
-                     CommandType == TEXT("add_blueprint_variable"))
+            else if (CommandTypeInGroup(CommandType, GetBlueprintNodeCommandTypes()))
             {
                 ResultJson = BlueprintNodeCommands->HandleCommand(CommandType, Params);
             }
             // Project Commands
-            else if (CommandType == TEXT("create_input_mapping"))
+            else if (CommandTypeInGroup(CommandType, GetProjectCommandTypes()))
             {
                 ResultJson = ProjectCommands->HandleCommand(CommandType, Params);
             }
             // Material Commands
-            else if (CommandType == TEXT("create_material") ||
-                     CommandType == TEXT("set_material_properties") ||
-                     CommandType == TEXT("add_material_expression") ||
-                     CommandType == TEXT("set_material_expression_property") ||
-                     CommandType == TEXT("connect_material_expressions") ||
-                     CommandType == TEXT("connect_material_property") ||
-                     CommandType == TEXT("recompile_material") ||
-                     CommandType == TEXT("configure_glass_material") ||
-                     CommandType == TEXT("rebuild_material_graph") ||
-                     CommandType == TEXT("get_material_compile_status") ||
-                     CommandType == TEXT("validate_material_graph") ||
-                     CommandType == TEXT("reload_asset_from_disk") ||
-                     CommandType == TEXT("close_asset_editor") ||
-                     CommandType == TEXT("is_asset_loaded_dirty") ||
-                     CommandType == TEXT("create_material_function") ||
-                     CommandType == TEXT("rebuild_material_function_graph"))
+            else if (CommandTypeInGroup(CommandType, GetMaterialCommandTypes()))
             {
                 ResultJson = MaterialCommands->HandleCommand(CommandType, Params);
             }
             // UMG Commands
-            else if (CommandType == TEXT("create_umg_widget_blueprint") ||
-                     CommandType == TEXT("add_text_block_to_widget") ||
-                     CommandType == TEXT("add_button_to_widget") ||
-                     CommandType == TEXT("bind_widget_event") ||
-                     CommandType == TEXT("set_text_block_binding") ||
-                     CommandType == TEXT("add_widget_to_viewport"))
+            else if (CommandTypeInGroup(CommandType, GetUMGCommandTypes()))
             {
                 ResultJson = UMGCommands->HandleCommand(CommandType, Params);
             }

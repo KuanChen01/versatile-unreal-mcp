@@ -1,12 +1,20 @@
 #include "Commands/UnrealMCPEditorCommands.h"
 #include "Commands/UnrealMCPCommonUtils.h"
+#include "UnrealMCPModule.h"
+#include "Algo/Reverse.h"
 #include "Editor.h"
 #include "EditorViewportClient.h"
+#include "FileHelpers.h"
 #include "LevelEditorViewport.h"
+#include "LevelEditor.h"
 #include "ImageUtils.h"
 #include "HighResScreenshot.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/Level.h"
+#include "Engine/World.h"
 #include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 #include "GameFramework/Actor.h"
 #include "Engine/Selection.h"
 #include "Kismet/GameplayStatics.h"
@@ -16,10 +24,310 @@
 #include "Engine/SpotLight.h"
 #include "Camera/CameraActor.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/MeshComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "EditorSubsystem.h"
 #include "Subsystems/EditorActorSubsystem.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Materials/MaterialInterface.h"
+#include "Modules/ModuleManager.h"
+#include "PlayInEditorDataTypes.h"
+#include "IMessageLogListing.h"
+#include "MessageLogModule.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectGlobals.h"
+
+namespace
+{
+    FViewport* GetActiveEditorViewport(FString& OutErrorMessage)
+    {
+        if (!GEditor)
+        {
+            OutErrorMessage = TEXT("Unreal Editor is not available");
+            return nullptr;
+        }
+
+        FViewport* ActiveViewport = GEditor->GetActiveViewport();
+        if (!ActiveViewport)
+        {
+            OutErrorMessage = TEXT("No active editor viewport is available");
+            return nullptr;
+        }
+
+        return ActiveViewport;
+    }
+
+    FLevelEditorViewportClient* GetFocusableViewportClient(FString& OutErrorMessage)
+    {
+        if (GCurrentLevelEditingViewportClient)
+        {
+            return GCurrentLevelEditingViewportClient;
+        }
+
+        FViewport* ActiveViewport = GetActiveEditorViewport(OutErrorMessage);
+        if (!ActiveViewport)
+        {
+            return nullptr;
+        }
+
+        FViewportClient* ViewportClient = ActiveViewport->GetClient();
+        if (!ViewportClient)
+        {
+            OutErrorMessage = TEXT("Active viewport does not have a client");
+            return nullptr;
+        }
+
+        FEditorViewportClient* EditorViewportClient = static_cast<FEditorViewportClient*>(ViewportClient);
+        if (!EditorViewportClient || !EditorViewportClient->IsLevelEditorClient())
+        {
+            OutErrorMessage = TEXT("Active viewport is not a level editor viewport");
+            return nullptr;
+        }
+
+        return static_cast<FLevelEditorViewportClient*>(EditorViewportClient);
+    }
+
+    bool ValidateArrayFieldLength(
+        const TSharedPtr<FJsonObject>& Params,
+        const FString& FieldName,
+        int32 ExpectedLength,
+        FString& OutErrorMessage)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* JsonArray = nullptr;
+        if (!Params->TryGetArrayField(FieldName, JsonArray) || !JsonArray)
+        {
+            OutErrorMessage = FString::Printf(TEXT("Missing '%s' parameter"), *FieldName);
+            return false;
+        }
+
+        if (JsonArray->Num() != ExpectedLength)
+        {
+            OutErrorMessage = FString::Printf(
+                TEXT("'%s' must contain exactly %d numeric values"),
+                *FieldName,
+                ExpectedLength);
+            return false;
+        }
+
+        return true;
+    }
+
+    TArray<TSharedPtr<FJsonValue>> MakeVectorArray(const FVector& Vector)
+    {
+        TArray<TSharedPtr<FJsonValue>> Values;
+        Values.Reserve(3);
+        Values.Add(MakeShared<FJsonValueNumber>(Vector.X));
+        Values.Add(MakeShared<FJsonValueNumber>(Vector.Y));
+        Values.Add(MakeShared<FJsonValueNumber>(Vector.Z));
+        return Values;
+    }
+
+    TArray<TSharedPtr<FJsonValue>> MakeIntPointArray(const FIntPoint& Point)
+    {
+        TArray<TSharedPtr<FJsonValue>> Values;
+        Values.Reserve(2);
+        Values.Add(MakeShared<FJsonValueNumber>(Point.X));
+        Values.Add(MakeShared<FJsonValueNumber>(Point.Y));
+        return Values;
+    }
+
+    FString LogVerbosityToString(ELogVerbosity::Type Verbosity)
+    {
+        switch (Verbosity & ELogVerbosity::VerbosityMask)
+        {
+        case ELogVerbosity::Fatal:
+            return TEXT("Fatal");
+        case ELogVerbosity::Error:
+            return TEXT("Error");
+        case ELogVerbosity::Warning:
+            return TEXT("Warning");
+        case ELogVerbosity::Display:
+            return TEXT("Display");
+        case ELogVerbosity::Log:
+            return TEXT("Log");
+        case ELogVerbosity::Verbose:
+            return TEXT("Verbose");
+        case ELogVerbosity::VeryVerbose:
+            return TEXT("VeryVerbose");
+        default:
+            return TEXT("Unknown");
+        }
+    }
+
+    FString MessageSeverityToString(EMessageSeverity::Type Severity)
+    {
+        switch (Severity)
+        {
+        case EMessageSeverity::Error:
+            return TEXT("Error");
+        case EMessageSeverity::PerformanceWarning:
+            return TEXT("PerformanceWarning");
+        case EMessageSeverity::Warning:
+            return TEXT("Warning");
+        case EMessageSeverity::Info:
+            return TEXT("Info");
+        default:
+            return TEXT("Unknown");
+        }
+    }
+
+    FString PlaySessionWorldTypeToString(EPlaySessionWorldType WorldType)
+    {
+        switch (WorldType)
+        {
+        case EPlaySessionWorldType::PlayInEditor:
+            return TEXT("play_in_editor");
+        case EPlaySessionWorldType::SimulateInEditor:
+            return TEXT("simulate_in_editor");
+        default:
+            return TEXT("inactive");
+        }
+    }
+
+    UWorld* GetEditorWorld(FString& OutErrorMessage)
+    {
+        if (!GEditor)
+        {
+            OutErrorMessage = TEXT("Unreal Editor is not available");
+            return nullptr;
+        }
+
+        UWorld* World = GEditor->GetEditorWorldContext().World();
+        if (!World)
+        {
+            OutErrorMessage = TEXT("Failed to get the editor world");
+            return nullptr;
+        }
+
+        return World;
+    }
+
+    bool MatchesFilter(const FString& Value, const FString& Filter)
+    {
+        return Filter.IsEmpty() || Value.Contains(Filter, ESearchCase::IgnoreCase);
+    }
+
+    bool MatchesExactFilter(const FString& Value, const FString& Filter)
+    {
+        return Filter.IsEmpty() || Value.Equals(Filter, ESearchCase::IgnoreCase);
+    }
+
+    int32 GetClampedMaxEntries(const TSharedPtr<FJsonObject>& Params, const FString& FieldName, int32 DefaultValue, int32 MinValue, int32 MaxValue)
+    {
+        int32 Value = DefaultValue;
+        if (Params->HasField(FieldName))
+        {
+            Value = Params->GetIntegerField(FieldName);
+        }
+
+        return FMath::Clamp(Value, MinValue, MaxValue);
+    }
+
+    bool ResolveLevelFilename(const FString& InputPath, FString& OutFilename, FString& OutPackageName, FString& OutErrorMessage)
+    {
+        FString LevelPath = InputPath;
+        LevelPath.TrimStartAndEndInline();
+        if (LevelPath.IsEmpty())
+        {
+            OutErrorMessage = TEXT("Level path is empty");
+            return false;
+        }
+
+        if (FPaths::FileExists(LevelPath))
+        {
+            OutFilename = FPaths::ConvertRelativePathToFull(LevelPath);
+            OutPackageName = FPackageName::FilenameToLongPackageName(OutFilename);
+            return true;
+        }
+
+        if (!LevelPath.StartsWith(TEXT("/")))
+        {
+            LevelPath = TEXT("/Game/") + LevelPath.TrimStartAndEnd();
+        }
+        else if (LevelPath.StartsWith(TEXT("/Game/")) == false)
+        {
+            OutErrorMessage = TEXT("Level path must be an absolute .umap file path or a /Game/... package path");
+            return false;
+        }
+
+        const int32 DotIndex = LevelPath.Find(TEXT("."), ESearchCase::CaseSensitive);
+        if (DotIndex != INDEX_NONE)
+        {
+            LevelPath = LevelPath.Left(DotIndex);
+        }
+
+        FString Filename;
+        if (!FPackageName::TryConvertLongPackageNameToFilename(LevelPath, Filename, FPackageName::GetMapPackageExtension()))
+        {
+            OutErrorMessage = FString::Printf(TEXT("Failed to convert level package path '%s' to a map filename"), *LevelPath);
+            return false;
+        }
+
+        Filename = FPaths::ConvertRelativePathToFull(Filename);
+        if (!FPaths::FileExists(Filename))
+        {
+            OutErrorMessage = FString::Printf(TEXT("Level file does not exist: %s"), *Filename);
+            return false;
+        }
+
+        OutFilename = Filename;
+        OutPackageName = LevelPath;
+        return true;
+    }
+
+    TSharedPtr<FJsonObject> BuildLevelStatusObject(UWorld* World)
+    {
+        TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+        ResultObj->SetBoolField(TEXT("success"), true);
+
+        UPackage* WorldPackage = World ? World->GetOutermost() : nullptr;
+        const FString PackageName = WorldPackage ? WorldPackage->GetName() : FString();
+        FString FilePath;
+        if (!PackageName.IsEmpty())
+        {
+            FPackageName::TryConvertLongPackageNameToFilename(PackageName, FilePath, FPackageName::GetMapPackageExtension());
+            if (!FilePath.IsEmpty())
+            {
+                FilePath = FPaths::ConvertRelativePathToFull(FilePath);
+            }
+        }
+
+        TArray<AActor*> AllActors;
+        if (World)
+        {
+            UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
+        }
+
+        ResultObj->SetStringField(TEXT("world_name"), World ? World->GetName() : FString());
+        ResultObj->SetStringField(TEXT("level_name"), PackageName.IsEmpty() ? FString() : FPackageName::GetLongPackageAssetName(PackageName));
+        ResultObj->SetStringField(TEXT("package_name"), PackageName);
+        ResultObj->SetStringField(TEXT("file_path"), FilePath);
+        ResultObj->SetBoolField(TEXT("is_dirty"), WorldPackage ? WorldPackage->IsDirty() : false);
+        ResultObj->SetNumberField(TEXT("actor_count"), AllActors.Num());
+        ResultObj->SetBoolField(TEXT("has_play_world"), GEditor && GEditor->PlayWorld != nullptr);
+
+        return ResultObj;
+    }
+
+    TSharedPtr<FJsonObject> MakeOutputLogEntryObject(const FUnrealMCPLogEntry& Entry)
+    {
+        TSharedPtr<FJsonObject> EntryObject = MakeShared<FJsonObject>();
+        EntryObject->SetStringField(TEXT("timestamp"), Entry.Timestamp);
+        EntryObject->SetStringField(TEXT("category"), Entry.Category);
+        EntryObject->SetStringField(TEXT("verbosity"), Entry.Verbosity);
+        EntryObject->SetStringField(TEXT("message"), Entry.Message);
+        return EntryObject;
+    }
+
+    TSharedPtr<FJsonObject> MakeMessageLogEntryObject(const TSharedRef<FTokenizedMessage>& Message)
+    {
+        TSharedPtr<FJsonObject> EntryObject = MakeShared<FJsonObject>();
+        EntryObject->SetStringField(TEXT("severity"), MessageSeverityToString(Message->GetSeverity()));
+        EntryObject->SetStringField(TEXT("message"), Message->ToText().ToString());
+        return EntryObject;
+    }
+}
 
 FUnrealMCPEditorCommands::FUnrealMCPEditorCommands()
 {
@@ -27,8 +335,44 @@ FUnrealMCPEditorCommands::FUnrealMCPEditorCommands()
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
 {
+    if (CommandType == TEXT("get_level_status"))
+    {
+        return HandleGetLevelStatus(Params);
+    }
+    else if (CommandType == TEXT("open_level"))
+    {
+        return HandleOpenLevel(Params);
+    }
+    else if (CommandType == TEXT("save_current_level"))
+    {
+        return HandleSaveCurrentLevel(Params);
+    }
+    else if (CommandType == TEXT("save_dirty_packages"))
+    {
+        return HandleSaveDirtyPackages(Params);
+    }
+    else if (CommandType == TEXT("get_play_state"))
+    {
+        return HandleGetPlayState(Params);
+    }
+    else if (CommandType == TEXT("start_pie"))
+    {
+        return HandleStartPIE(Params);
+    }
+    else if (CommandType == TEXT("stop_pie"))
+    {
+        return HandleStopPIE(Params);
+    }
+    else if (CommandType == TEXT("get_output_log"))
+    {
+        return HandleGetOutputLog(Params);
+    }
+    else if (CommandType == TEXT("get_message_log"))
+    {
+        return HandleGetMessageLog(Params);
+    }
     // Actor manipulation commands
-    if (CommandType == TEXT("get_actors_in_level"))
+    else if (CommandType == TEXT("get_actors_in_level"))
     {
         return HandleGetActorsInLevel(Params);
     }
@@ -43,6 +387,10 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
             UE_LOG(LogTemp, Warning, TEXT("'create_actor' command is deprecated and will be removed in a future version. Please use 'spawn_actor' instead."));
         }
         return HandleSpawnActor(Params);
+    }
+    else if (CommandType == TEXT("spawn_actor_by_class"))
+    {
+        return HandleSpawnActorByClass(Params);
     }
     else if (CommandType == TEXT("delete_actor"))
     {
@@ -60,6 +408,14 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
     {
         return HandleSetActorProperty(Params);
     }
+    else if (CommandType == TEXT("assign_material_to_actor"))
+    {
+        return HandleAssignMaterialToActor(Params);
+    }
+    else if (CommandType == TEXT("get_viewport_status"))
+    {
+        return HandleGetViewportStatus(Params);
+    }
     // Blueprint actor spawning
     else if (CommandType == TEXT("spawn_blueprint_actor"))
     {
@@ -74,8 +430,395 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
     {
         return HandleTakeScreenshot(Params);
     }
-    
+
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown editor command: %s"), *CommandType));
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetViewportStatus(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ViewportErrorMessage;
+    FViewport* ActiveViewport = GetActiveEditorViewport(ViewportErrorMessage);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+
+    if (!ActiveViewport)
+    {
+        ResultObj->SetBoolField(TEXT("has_active_viewport"), false);
+        ResultObj->SetField(TEXT("size"), MakeShared<FJsonValueNull>());
+        ResultObj->SetBoolField(TEXT("can_focus"), false);
+        ResultObj->SetBoolField(TEXT("can_screenshot"), false);
+        ResultObj->SetStringField(TEXT("message"), ViewportErrorMessage);
+        return ResultObj;
+    }
+
+    const FIntPoint ViewportSize = ActiveViewport->GetSizeXY();
+    FString FocusErrorMessage;
+    const bool bCanFocus = GetFocusableViewportClient(FocusErrorMessage) != nullptr;
+    const bool bCanScreenshot = ViewportSize.X > 0 && ViewportSize.Y > 0;
+
+    ResultObj->SetBoolField(TEXT("has_active_viewport"), true);
+    ResultObj->SetArrayField(TEXT("size"), MakeIntPointArray(ViewportSize));
+    ResultObj->SetBoolField(TEXT("can_focus"), bCanFocus);
+    ResultObj->SetBoolField(TEXT("can_screenshot"), bCanScreenshot);
+    if (!bCanFocus && !FocusErrorMessage.IsEmpty())
+    {
+        ResultObj->SetStringField(TEXT("message"), FocusErrorMessage);
+    }
+
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetLevelStatus(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ErrorMessage;
+    UWorld* EditorWorld = GetEditorWorld(ErrorMessage);
+    if (!EditorWorld)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(ErrorMessage);
+    }
+
+    return BuildLevelStatusObject(EditorWorld);
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleOpenLevel(const TSharedPtr<FJsonObject>& Params)
+{
+    FString LevelPath;
+    if (!Params->TryGetStringField(TEXT("level_path"), LevelPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'level_path' parameter"));
+    }
+
+    if (GEditor && GEditor->IsPlaySessionInProgress())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Cannot open a level while a play session is active"));
+    }
+
+    bool bSaveDirtyPackages = false;
+    Params->TryGetBoolField(TEXT("save_dirty_packages"), bSaveDirtyPackages);
+
+    FString EditorWorldError;
+    UWorld* EditorWorld = GetEditorWorld(EditorWorldError);
+    if (!EditorWorld)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(EditorWorldError);
+    }
+
+    if (UPackage* CurrentWorldPackage = EditorWorld->GetOutermost())
+    {
+        if (CurrentWorldPackage->IsDirty())
+        {
+            if (!bSaveDirtyPackages)
+            {
+                return FUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("The current level has unsaved changes. Save it first or pass save_dirty_packages=true."));
+            }
+
+            bool bPackagesNeededSaving = false;
+            const bool bSaved = FEditorFileUtils::SaveDirtyPackages(
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                &bPackagesNeededSaving);
+
+            if (!bSaved)
+            {
+                return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to save dirty packages before opening the requested level"));
+            }
+        }
+    }
+
+    FString LevelFilename;
+    FString LevelPackageName;
+    FString ResolveError;
+    if (!ResolveLevelFilename(LevelPath, LevelFilename, LevelPackageName, ResolveError))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    UWorld* LoadedWorld = UEditorLoadingAndSavingUtils::LoadMap(LevelFilename);
+    if (!LoadedWorld)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to load level: %s"), *LevelFilename));
+    }
+
+    return BuildLevelStatusObject(LoadedWorld);
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSaveCurrentLevel(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ErrorMessage;
+    UWorld* EditorWorld = GetEditorWorld(ErrorMessage);
+    if (!EditorWorld)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(ErrorMessage);
+    }
+
+    UPackage* WorldPackage = EditorWorld->GetOutermost();
+    const bool bWasDirty = WorldPackage && WorldPackage->IsDirty();
+    if (!UEditorLoadingAndSavingUtils::SaveCurrentLevel())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to save the current level"));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = BuildLevelStatusObject(EditorWorld);
+    ResultObj->SetBoolField(TEXT("saved"), true);
+    ResultObj->SetBoolField(TEXT("was_dirty"), bWasDirty);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSaveDirtyPackages(const TSharedPtr<FJsonObject>& Params)
+{
+    bool bSaveMapPackages = true;
+    bool bSaveContentPackages = true;
+    Params->TryGetBoolField(TEXT("save_map_packages"), bSaveMapPackages);
+    Params->TryGetBoolField(TEXT("save_content_packages"), bSaveContentPackages);
+
+    bool bPackagesNeededSaving = false;
+    const bool bSaved = FEditorFileUtils::SaveDirtyPackages(
+        false,
+        bSaveMapPackages,
+        bSaveContentPackages,
+        true,
+        false,
+        false,
+        &bPackagesNeededSaving);
+
+    if (!bSaved)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to save dirty packages"));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetBoolField(TEXT("saved"), true);
+    ResultObj->SetBoolField(TEXT("packages_needed_saving"), bPackagesNeededSaving);
+    ResultObj->SetBoolField(TEXT("save_map_packages"), bSaveMapPackages);
+    ResultObj->SetBoolField(TEXT("save_content_packages"), bSaveContentPackages);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetPlayState(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Unreal Editor is not available"));
+    }
+
+    const TOptional<FPlayInEditorSessionInfo> SessionInfo = GEditor->GetPlayInEditorSessionInfo();
+    const TOptional<FRequestPlaySessionParams> SessionRequest = GEditor->GetPlaySessionRequest();
+
+    FString SessionType = TEXT("inactive");
+    if (SessionInfo.IsSet())
+    {
+        SessionType = PlaySessionWorldTypeToString(SessionInfo->OriginalRequestParams.WorldType);
+    }
+    else if (SessionRequest.IsSet())
+    {
+        SessionType = PlaySessionWorldTypeToString(SessionRequest->WorldType);
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetBoolField(TEXT("is_play_session_in_progress"), GEditor->IsPlaySessionInProgress());
+    ResultObj->SetBoolField(TEXT("is_playing_session_in_editor"), GEditor->IsPlayingSessionInEditor());
+    ResultObj->SetBoolField(TEXT("is_play_session_request_queued"), GEditor->IsPlaySessionRequestQueued());
+    ResultObj->SetBoolField(TEXT("is_simulating_in_editor"), GEditor->IsSimulatingInEditor());
+    ResultObj->SetStringField(TEXT("session_type"), SessionType);
+    ResultObj->SetBoolField(TEXT("has_play_world"), GEditor->PlayWorld != nullptr);
+    ResultObj->SetStringField(TEXT("play_world_name"), GEditor->PlayWorld ? GEditor->PlayWorld->GetName() : FString());
+    ResultObj->SetNumberField(TEXT("pie_instance_count"), SessionInfo.IsSet() ? SessionInfo->PIEInstanceCount : 0);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleStartPIE(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Unreal Editor is not available"));
+    }
+
+    if (GEditor->IsPlaySessionInProgress())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("A play session is already active or queued"));
+    }
+
+    bool bSimulate = false;
+    Params->TryGetBoolField(TEXT("simulate"), bSimulate);
+
+    TOptional<FVector> StartLocation;
+    if (Params->HasField(TEXT("location")))
+    {
+        FString ValidationError;
+        if (!ValidateArrayFieldLength(Params, TEXT("location"), 3, ValidationError))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(ValidationError);
+        }
+        StartLocation = FUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("location"));
+    }
+
+    TOptional<FRotator> StartRotation;
+    if (Params->HasField(TEXT("rotation")))
+    {
+        FString ValidationError;
+        if (!ValidateArrayFieldLength(Params, TEXT("rotation"), 3, ValidationError))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(ValidationError);
+        }
+        StartRotation = FUnrealMCPCommonUtils::GetRotatorFromJson(Params, TEXT("rotation"));
+    }
+
+    FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
+    TSharedPtr<IAssetViewport> ActiveLevelViewport = LevelEditorModule.GetFirstActiveViewport();
+    if (!ActiveLevelViewport.IsValid())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No active level editor viewport is available for PIE"));
+    }
+
+    FRequestPlaySessionParams SessionParams;
+    SessionParams.WorldType = bSimulate ? EPlaySessionWorldType::SimulateInEditor : EPlaySessionWorldType::PlayInEditor;
+    SessionParams.DestinationSlateViewport = ActiveLevelViewport;
+    if (StartLocation.IsSet())
+    {
+        SessionParams.StartLocation = StartLocation;
+    }
+    if (StartRotation.IsSet())
+    {
+        SessionParams.StartRotation = StartRotation;
+    }
+
+    GEditor->RequestPlaySession(SessionParams);
+
+    TSharedPtr<FJsonObject> ResultObj = HandleGetPlayState(Params);
+    ResultObj->SetBoolField(TEXT("requested"), true);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleStopPIE(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Unreal Editor is not available"));
+    }
+
+    if (!GEditor->IsPlaySessionInProgress())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No play session is currently active or queued"));
+    }
+
+    if (GEditor->IsPlaySessionRequestQueued() && !GEditor->IsPlayingSessionInEditor())
+    {
+        GEditor->CancelRequestPlaySession();
+    }
+    else
+    {
+        GEditor->RequestEndPlayMap();
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = HandleGetPlayState(Params);
+    ResultObj->SetBoolField(TEXT("stop_requested"), true);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetOutputLog(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!FUnrealMCPModule::IsAvailable())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("UnrealMCP module is not available"));
+    }
+
+    const int32 MaxEntries = GetClampedMaxEntries(Params, TEXT("max_entries"), 200, 1, 1000);
+
+    FString ContainsFilter;
+    FString CategoryFilter;
+    FString VerbosityFilter;
+    Params->TryGetStringField(TEXT("contains"), ContainsFilter);
+    Params->TryGetStringField(TEXT("category"), CategoryFilter);
+    Params->TryGetStringField(TEXT("verbosity"), VerbosityFilter);
+
+    const TArray<FUnrealMCPLogEntry> BufferedEntries = FUnrealMCPModule::Get().GetBufferedLogEntries();
+    TArray<TSharedPtr<FJsonValue>> EntryArray;
+    EntryArray.Reserve(MaxEntries);
+
+    for (int32 Index = BufferedEntries.Num() - 1; Index >= 0 && EntryArray.Num() < MaxEntries; --Index)
+    {
+        const FUnrealMCPLogEntry& Entry = BufferedEntries[Index];
+        if (!MatchesFilter(Entry.Message, ContainsFilter))
+        {
+            continue;
+        }
+        if (!MatchesExactFilter(Entry.Category, CategoryFilter))
+        {
+            continue;
+        }
+        if (!MatchesExactFilter(Entry.Verbosity, VerbosityFilter))
+        {
+            continue;
+        }
+
+        EntryArray.Add(MakeShared<FJsonValueObject>(MakeOutputLogEntryObject(Entry)));
+    }
+
+    Algo::Reverse(EntryArray);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetNumberField(TEXT("total_buffered"), BufferedEntries.Num());
+    ResultObj->SetNumberField(TEXT("returned_entries"), EntryArray.Num());
+    ResultObj->SetArrayField(TEXT("entries"), EntryArray);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetMessageLog(const TSharedPtr<FJsonObject>& Params)
+{
+    const int32 MaxEntries = GetClampedMaxEntries(Params, TEXT("max_entries"), 100, 1, 500);
+
+    FString LogName = TEXT("PIE");
+    FString ContainsFilter;
+    FString SeverityFilter;
+    Params->TryGetStringField(TEXT("log_name"), LogName);
+    Params->TryGetStringField(TEXT("contains"), ContainsFilter);
+    Params->TryGetStringField(TEXT("severity"), SeverityFilter);
+
+    FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>(TEXT("MessageLog"));
+    const bool bWasRegistered = MessageLogModule.IsRegisteredLogListing(*LogName);
+    TSharedRef<IMessageLogListing> LogListing = MessageLogModule.GetLogListing(*LogName);
+    const TArray<TSharedRef<FTokenizedMessage>>& Messages = LogListing->GetFilteredMessages();
+
+    TArray<TSharedPtr<FJsonValue>> EntryArray;
+    EntryArray.Reserve(MaxEntries);
+
+    for (int32 Index = Messages.Num() - 1; Index >= 0 && EntryArray.Num() < MaxEntries; --Index)
+    {
+        const TSharedRef<FTokenizedMessage>& Message = Messages[Index];
+        const FString MessageText = Message->ToText().ToString();
+        const FString Severity = MessageSeverityToString(Message->GetSeverity());
+
+        if (!MatchesFilter(MessageText, ContainsFilter))
+        {
+            continue;
+        }
+        if (!MatchesExactFilter(Severity, SeverityFilter))
+        {
+            continue;
+        }
+
+        EntryArray.Add(MakeShared<FJsonValueObject>(MakeMessageLogEntryObject(Message)));
+    }
+
+    Algo::Reverse(EntryArray);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("log_name"), LogName);
+    ResultObj->SetBoolField(TEXT("registered"), bWasRegistered);
+    ResultObj->SetNumberField(TEXT("total_messages"), Messages.Num());
+    ResultObj->SetNumberField(TEXT("returned_entries"), EntryArray.Num());
+    ResultObj->SetArrayField(TEXT("entries"), EntryArray);
+    return ResultObj;
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetActorsInLevel(const TSharedPtr<FJsonObject>& Params)
@@ -396,6 +1139,281 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorProperty(const T
     }
 }
 
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActorByClass(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ClassPath;
+    if (!Params->TryGetStringField(TEXT("class_path"), ClassPath))
+    {
+        if (!Params->TryGetStringField(TEXT("class"), ClassPath))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'class_path' parameter (e.g. /Script/Engine.PointLight or /Game/BP.BP_C)"));
+        }
+    }
+
+    FString ActorName;
+    Params->TryGetStringField(TEXT("name"), ActorName);
+    if (ActorName.IsEmpty())
+    {
+        Params->TryGetStringField(TEXT("actor_name"), ActorName);
+    }
+
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No editor world available"));
+    }
+
+    // Resolve UClass from soft path or short name
+    UClass* ActorClass = nullptr;
+    FString ResolvedPath = ClassPath.TrimStartAndEnd();
+
+    if (!ResolvedPath.Contains(TEXT("/")) && !ResolvedPath.Contains(TEXT(".")))
+    {
+        // Short names: PointLight, StaticMeshActor, CameraActor
+        static const TMap<FString, FString> ClassAliases = {
+            {TEXT("StaticMeshActor"), TEXT("/Script/Engine.StaticMeshActor")},
+            {TEXT("PointLight"), TEXT("/Script/Engine.PointLight")},
+            {TEXT("SpotLight"), TEXT("/Script/Engine.SpotLight")},
+            {TEXT("DirectionalLight"), TEXT("/Script/Engine.DirectionalLight")},
+            {TEXT("CameraActor"), TEXT("/Script/Engine.CameraActor")},
+            {TEXT("Actor"), TEXT("/Script/Engine.Actor")},
+            {TEXT("Pawn"), TEXT("/Script/Engine.Pawn")},
+            {TEXT("Character"), TEXT("/Script/Engine.Character")},
+        };
+        if (const FString* Mapped = ClassAliases.Find(ResolvedPath))
+        {
+            ResolvedPath = *Mapped;
+        }
+        else
+        {
+            ResolvedPath = FString::Printf(TEXT("/Script/Engine.%s"), *ResolvedPath);
+        }
+    }
+
+    // Blueprint generated class: /Game/Foo.Foo_C or /Game/Foo.Foo
+    if (ResolvedPath.StartsWith(TEXT("/Game/")) && !ResolvedPath.EndsWith(TEXT("_C")))
+    {
+        FString PackagePath = ResolvedPath;
+        FString ObjectName;
+        if (ResolvedPath.Contains(TEXT(".")))
+        {
+            const FSoftObjectPath SoftPath(ResolvedPath);
+            PackagePath = SoftPath.GetLongPackageName();
+            ObjectName = SoftPath.GetAssetName();
+        }
+        else
+        {
+            ObjectName = FPackageName::GetShortName(PackagePath);
+        }
+
+        // Try Blueprint asset first
+        const FString BPObjectPath = FString::Printf(TEXT("%s.%s"), *PackagePath, *ObjectName);
+        if (UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *BPObjectPath))
+        {
+            ActorClass = BP->GeneratedClass;
+        }
+        if (!ActorClass)
+        {
+            const FString GenClassPath = FString::Printf(TEXT("%s.%s_C"), *PackagePath, *ObjectName);
+            ActorClass = LoadObject<UClass>(nullptr, *GenClassPath);
+        }
+    }
+
+    if (!ActorClass)
+    {
+        ActorClass = LoadObject<UClass>(nullptr, *ResolvedPath);
+    }
+    if (!ActorClass)
+    {
+        ActorClass = FindObject<UClass>(nullptr, *ResolvedPath);
+    }
+    if (!ActorClass)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Could not resolve actor class from '%s'"), *ClassPath));
+    }
+    if (!ActorClass->IsChildOf(AActor::StaticClass()))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Class '%s' is not an Actor"), *ActorClass->GetPathName()));
+    }
+
+    if (!ActorName.IsEmpty())
+    {
+        TArray<AActor*> AllActors;
+        UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
+        for (AActor* Existing : AllActors)
+        {
+            if (Existing && Existing->GetName() == ActorName)
+            {
+                return FUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Actor with name '%s' already exists"), *ActorName));
+            }
+        }
+    }
+
+    FVector Location(0.f, 0.f, 0.f);
+    FRotator Rotation(0.f, 0.f, 0.f);
+    FVector Scale(1.f, 1.f, 1.f);
+    if (Params->HasField(TEXT("location")))
+    {
+        Location = FUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("location"));
+    }
+    if (Params->HasField(TEXT("rotation")))
+    {
+        Rotation = FUnrealMCPCommonUtils::GetRotatorFromJson(Params, TEXT("rotation"));
+    }
+    if (Params->HasField(TEXT("scale")))
+    {
+        Scale = FUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("scale"));
+    }
+
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    if (!ActorName.IsEmpty())
+    {
+        SpawnParams.Name = FName(*ActorName);
+    }
+
+    AActor* NewActor = World->SpawnActor<AActor>(ActorClass, Location, Rotation, SpawnParams);
+    if (!NewActor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to spawn actor"));
+    }
+
+    NewActor->SetActorScale3D(Scale);
+
+    TSharedPtr<FJsonObject> ResultObj = FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("class_path"), ActorClass->GetPathName());
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleAssignMaterialToActor(const TSharedPtr<FJsonObject>& Params)
+{
+    FString ActorName;
+    if (!Params->TryGetStringField(TEXT("actor_name"), ActorName))
+    {
+        if (!Params->TryGetStringField(TEXT("name"), ActorName))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'actor_name' parameter"));
+        }
+    }
+
+    FString MaterialPath;
+    if (!Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'material_path' parameter"));
+    }
+
+    FString ComponentName;
+    Params->TryGetStringField(TEXT("component_name"), ComponentName);
+
+    int32 SlotIndex = 0;
+    if (Params->HasField(TEXT("slot_index")))
+    {
+        SlotIndex = static_cast<int32>(Params->GetNumberField(TEXT("slot_index")));
+    }
+
+    FString SlotName;
+    Params->TryGetStringField(TEXT("slot_name"), SlotName);
+
+    // Find actor
+    AActor* TargetActor = nullptr;
+    TArray<AActor*> AllActors;
+    UGameplayStatics::GetAllActorsOfClass(GWorld, AActor::StaticClass(), AllActors);
+    for (AActor* Actor : AllActors)
+    {
+        if (Actor && Actor->GetName() == ActorName)
+        {
+            TargetActor = Actor;
+            break;
+        }
+    }
+    if (!TargetActor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName));
+    }
+
+    // Load material interface
+    FString MatObjectPath = MaterialPath.TrimStartAndEnd();
+    if (!MatObjectPath.Contains(TEXT(".")))
+    {
+        const FString Leaf = FPackageName::GetShortName(MatObjectPath);
+        MatObjectPath = FString::Printf(TEXT("%s.%s"), *MatObjectPath, *Leaf);
+    }
+    UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MatObjectPath);
+    if (!Material)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Material not found: %s"), *MaterialPath));
+    }
+
+    // Resolve mesh component
+    UMeshComponent* MeshComp = nullptr;
+    TArray<UMeshComponent*> MeshComponents;
+    TargetActor->GetComponents<UMeshComponent>(MeshComponents);
+
+    if (!ComponentName.IsEmpty())
+    {
+        for (UMeshComponent* Comp : MeshComponents)
+        {
+            if (Comp && (Comp->GetName() == ComponentName || Comp->GetFName().ToString() == ComponentName))
+            {
+                MeshComp = Comp;
+                break;
+            }
+        }
+        if (!MeshComp)
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Mesh component '%s' not found on actor '%s'"), *ComponentName, *ActorName));
+        }
+    }
+    else if (MeshComponents.Num() > 0)
+    {
+        MeshComp = MeshComponents[0];
+    }
+    else
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Actor '%s' has no mesh components"), *ActorName));
+    }
+
+    if (!SlotName.IsEmpty())
+    {
+        const TArray<FName> SlotNames = MeshComp->GetMaterialSlotNames();
+        const int32 Found = SlotNames.IndexOfByKey(FName(*SlotName));
+        if (Found == INDEX_NONE)
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Material slot '%s' not found on component '%s'"), *SlotName, *MeshComp->GetName()));
+        }
+        SlotIndex = Found;
+    }
+
+    if (SlotIndex < 0)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("slot_index must be >= 0"));
+    }
+
+    MeshComp->SetMaterial(SlotIndex, Material);
+    MeshComp->MarkRenderStateDirty();
+    TargetActor->MarkPackageDirty();
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetStringField(TEXT("actor_name"), ActorName);
+    ResultObj->SetStringField(TEXT("component_name"), MeshComp->GetName());
+    ResultObj->SetStringField(TEXT("material_path"), Material->GetPathName());
+    ResultObj->SetNumberField(TEXT("slot_index"), SlotIndex);
+    if (!SlotName.IsEmpty())
+    {
+        ResultObj->SetStringField(TEXT("slot_name"), SlotName);
+    }
+    return ResultObj;
+}
+
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(const TSharedPtr<FJsonObject>& Params)
 {
     // Get required parameters
@@ -498,6 +1516,11 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleFocusViewport(const TSha
     bool HasLocation = false;
     if (Params->HasField(TEXT("location")))
     {
+        FString ValidationError;
+        if (!ValidateArrayFieldLength(Params, TEXT("location"), 3, ValidationError))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(ValidationError);
+        }
         Location = FUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("location"));
         HasLocation = true;
     }
@@ -514,16 +1537,28 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleFocusViewport(const TSha
     bool HasOrientation = false;
     if (Params->HasField(TEXT("orientation")))
     {
+        FString ValidationError;
+        if (!ValidateArrayFieldLength(Params, TEXT("orientation"), 3, ValidationError))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(ValidationError);
+        }
         Orientation = FUnrealMCPCommonUtils::GetRotatorFromJson(Params, TEXT("orientation"));
         HasOrientation = true;
     }
 
-    // Get the active viewport
-    FLevelEditorViewportClient* ViewportClient = (FLevelEditorViewportClient*)GEditor->GetActiveViewport()->GetClient();
+    if (Distance < 0.0f)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'distance' must be non-negative"));
+    }
+
+    FString ViewportErrorMessage;
+    FLevelEditorViewportClient* ViewportClient = GetFocusableViewportClient(ViewportErrorMessage);
     if (!ViewportClient)
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get active viewport"));
+        return FUnrealMCPCommonUtils::CreateErrorResponse(ViewportErrorMessage);
     }
+
+    FVector FocusPoint = FVector::ZeroVector;
 
     // If we have a target actor, focus on it
     if (HasTargetActor)
@@ -547,30 +1582,33 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleFocusViewport(const TSha
             return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *TargetActorName));
         }
 
-        // Focus on the actor
-        ViewportClient->SetViewLocation(TargetActor->GetActorLocation() - FVector(Distance, 0.0f, 0.0f));
+        FocusPoint = TargetActor->GetActorLocation();
     }
     // Otherwise use the provided location
     else if (HasLocation)
     {
-        ViewportClient->SetViewLocation(Location - FVector(Distance, 0.0f, 0.0f));
+        FocusPoint = Location;
     }
     else
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Either 'target' or 'location' must be provided"));
     }
 
-    // Set orientation if provided
-    if (HasOrientation)
-    {
-        ViewportClient->SetViewRotation(Orientation);
-    }
+    const FRotator ViewRotation = HasOrientation ? Orientation : ViewportClient->GetViewRotation();
+    ViewportClient->SetViewRotation(ViewRotation);
+    ViewportClient->SetViewLocation(FocusPoint - (ViewRotation.Vector() * Distance));
 
     // Force viewport to redraw
     ViewportClient->Invalidate();
 
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
     ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetArrayField(TEXT("focus_point"), MakeVectorArray(FocusPoint));
+    ResultObj->SetNumberField(TEXT("distance"), Distance);
+    if (HasTargetActor)
+    {
+        ResultObj->SetStringField(TEXT("target"), TargetActorName);
+    }
     return ResultObj;
 }
 
@@ -589,26 +1627,35 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
         FilePath += TEXT(".png");
     }
 
-    // Get the active viewport
-    if (GEditor && GEditor->GetActiveViewport())
+    FString ViewportErrorMessage;
+    FViewport* Viewport = GetActiveEditorViewport(ViewportErrorMessage);
+    if (!Viewport)
     {
-        FViewport* Viewport = GEditor->GetActiveViewport();
-        TArray<FColor> Bitmap;
-        FIntRect ViewportRect(0, 0, Viewport->GetSizeXY().X, Viewport->GetSizeXY().Y);
-        
-        if (Viewport->ReadPixels(Bitmap, FReadSurfaceDataFlags(), ViewportRect))
-        {
-            TArray<uint8> CompressedBitmap;
-            FImageUtils::CompressImageArray(Viewport->GetSizeXY().X, Viewport->GetSizeXY().Y, Bitmap, CompressedBitmap);
-            
-            if (FFileHelper::SaveArrayToFile(CompressedBitmap, *FilePath))
-            {
-                TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-                ResultObj->SetStringField(TEXT("filepath"), FilePath);
-                return ResultObj;
-            }
-        }
+        return FUnrealMCPCommonUtils::CreateErrorResponse(ViewportErrorMessage);
     }
-    
-    return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to take screenshot"));
+
+    const FIntPoint ViewportSize = Viewport->GetSizeXY();
+    if (ViewportSize.X <= 0 || ViewportSize.Y <= 0)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Active viewport does not report a valid size"));
+    }
+
+    TArray<FColor> Bitmap;
+    FIntRect ViewportRect(0, 0, ViewportSize.X, ViewportSize.Y);
+    if (!Viewport->ReadPixels(Bitmap, FReadSurfaceDataFlags(), ViewportRect))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to read pixels from the active viewport"));
+    }
+
+    TArray<uint8> CompressedBitmap;
+    FImageUtils::CompressImageArray(ViewportSize.X, ViewportSize.Y, Bitmap, CompressedBitmap);
+    if (!FFileHelper::SaveArrayToFile(CompressedBitmap, *FilePath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to write screenshot file"));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("filepath"), FilePath);
+    ResultObj->SetArrayField(TEXT("size"), MakeIntPointArray(ViewportSize));
+    return ResultObj;
 } 
