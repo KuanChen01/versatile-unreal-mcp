@@ -219,6 +219,7 @@ UK2Node_Event* FUnrealMCPCommonUtils::CreateEventNode(UEdGraph* Graph, const FSt
         EventNode->NodePosX = Position.X;
         EventNode->NodePosY = Position.Y;
         Graph->AddNode(EventNode, true);
+        EventNode->CreateNewGuid();
         EventNode->PostPlacedNewNode();
         EventNode->AllocateDefaultPins();
         UE_LOG(LogTemp, Display, TEXT("Created new event node with name %s (ID: %s)"), 
