@@ -159,3 +159,10 @@ Backup/
 #
 UNREAL/Source/
 UNREAL/SOURCE/
+
+# Local-only: do not publish to origin (personal planning / private vault mapping / local tests)
+obsiguide.md
+obsiguide.template.md
+PROJECT_GAPS_AND_ROADMAP.md
+Python/tests/
+Python/scripts/smoke/
