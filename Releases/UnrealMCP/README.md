@@ -19,6 +19,16 @@ Artifacts:
 
 Checksums: see `SHA256SUMS.txt`.
 
+## Package contents (this refresh)
+
+Includes HEAD plugin features as of **2026-07-15**:
+
+- Protocol 2.0 framing + hard handshake surface
+- P1 tools: `find_assets`, `get_asset_info`, `delete_asset`, `spawn_actor_by_class`, `assign_material_to_actor`
+- Multi-instance env: `UNREAL_MCP_HOST` / `UNREAL_MCP_PORT`
+- Blueprint atomic graph: `rebuild_blueprint_graph`, `batch_connect_blueprint_nodes`
+- graph_spec expand: `branch`, `cast`, `custom_event`, `timeline` + pin aliases
+
 ## Manual install
 
 1. Pick the zip that matches your Unreal Engine version.
@@ -31,7 +41,7 @@ uv sync
 uv run unreal_mcp_server.py
 ```
 
-The Unreal plugin listens on `127.0.0.1:55557`. The Python server speaks protocol **2.0** and hard-handshakes on connect.
+The Unreal plugin listens on `127.0.0.1:55557` by default. The Python server speaks protocol **2.0** and hard-handshakes on connect.
 
 ## Verify after install
 
@@ -47,10 +57,12 @@ Or at least:
 uv --directory D:\MCP\Unreal\Python run python -c "from bridge_client import run_bridge_command; print(run_bridge_command('get_bridge_status'))"
 ```
 
-Expect `protocol_version: "2.0"` and `success: true`.
+Expect `protocol_version: "2.0"` and `success: true`. Full smoke is **9** cases when Editor + plugin match this package.
 
 ## Rebuild notes
 
-Packages were produced with Epic `RunUAT BuildPlugin` from `MCPGameProject/Plugins/UnrealMCP` (protocol 2.0 source), Win64 Editor Development, engines installed under `D:\Software\Unreal\UE_5.5` / `UE_5.6` / `UE_5.7`.
+Packages were produced with Epic `RunUAT BuildPlugin` from `MCPGameProject/Plugins/UnrealMCP`, Win64 Editor Development, engines under `D:\Software\Unreal\UE_5.5` / `UE_5.6` / `UE_5.7`.
 
-Last refreshed: 2026-07-14.
+Each zip root is `UnrealMCP/` (`Binaries/Win64` + `Source` + `.uplugin`).
+
+Last refreshed: **2026-07-15** (P1 + BP graph expand).
