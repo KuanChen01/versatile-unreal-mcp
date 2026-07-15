@@ -594,6 +594,42 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetComponentProperty(
                         UE_LOG(LogTemp, Error, TEXT("SetComponentProperty - %s"), *ErrorMessage);
                     }
                 }
+                else if (StructProp->Struct == TBaseStructure<FRotator>::Get())
+                {
+                    // [Pitch, Yaw, Roll] or {Pitch,Yaw,Roll}
+                    FRotator Rot = FRotator::ZeroRotator;
+                    if (JsonValue->Type == EJson::Array)
+                    {
+                        const TArray<TSharedPtr<FJsonValue>>& Arr = JsonValue->AsArray();
+                        if (Arr.Num() == 3)
+                        {
+                            Rot = FRotator(Arr[0]->AsNumber(), Arr[1]->AsNumber(), Arr[2]->AsNumber());
+                            void* PropertyAddr = StructProp->ContainerPtrToValuePtr<void>(ComponentTemplate);
+                            StructProp->CopySingleValue(PropertyAddr, &Rot);
+                            bSuccess = true;
+                            UE_LOG(LogTemp, Log, TEXT("SetComponentProperty - Setting Rotator(P=%f Y=%f R=%f)"),
+                                Rot.Pitch, Rot.Yaw, Rot.Roll);
+                        }
+                        else
+                        {
+                            ErrorMessage = FString::Printf(TEXT("Rotator property requires 3 values [Pitch,Yaw,Roll], got %d"), Arr.Num());
+                        }
+                    }
+                    else if (JsonValue->Type == EJson::Object)
+                    {
+                        const TSharedPtr<FJsonObject>& Obj = JsonValue->AsObject();
+                        Rot.Pitch = static_cast<float>(Obj->GetNumberField(TEXT("Pitch")));
+                        Rot.Yaw = static_cast<float>(Obj->GetNumberField(TEXT("Yaw")));
+                        Rot.Roll = static_cast<float>(Obj->GetNumberField(TEXT("Roll")));
+                        void* PropertyAddr = StructProp->ContainerPtrToValuePtr<void>(ComponentTemplate);
+                        StructProp->CopySingleValue(PropertyAddr, &Rot);
+                        bSuccess = true;
+                    }
+                    else
+                    {
+                        ErrorMessage = TEXT("Rotator property requires [Pitch,Yaw,Roll] array or {Pitch,Yaw,Roll} object");
+                    }
+                }
                 else
                 {
                     // Handle other struct properties using default handler

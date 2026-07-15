@@ -971,21 +971,34 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteActor(const TShare
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'name' parameter"));
     }
 
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : GWorld;
+    if (!World)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No editor world available"));
+    }
+
     TArray<AActor*> AllActors;
-    UGameplayStatics::GetAllActorsOfClass(GWorld, AActor::StaticClass(), AllActors);
+    UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
     
     for (AActor* Actor : AllActors)
     {
-        if (Actor && Actor->GetName() == ActorName)
+        if (Actor && !Actor->IsActorBeingDestroyed() && Actor->GetName() == ActorName)
         {
             // Store actor info before deletion for the response
             TSharedPtr<FJsonObject> ActorInfo = FUnrealMCPCommonUtils::ActorToJsonObject(Actor);
-            
-            // Delete the actor
-            Actor->Destroy();
+
+            // Editor destroy frees the object name so a later spawn can reuse it.
+            // Plain Destroy() leaves the name reserved until GC and can crash spawn with Required_Fatal.
+            const bool bDestroyed = World->EditorDestroyActor(Actor, true);
+            if (!bDestroyed)
+            {
+                return FUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(TEXT("Failed to destroy actor: %s"), *ActorName));
+            }
             
             TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
             ResultObj->SetObjectField(TEXT("deleted_actor"), ActorInfo);
+            ResultObj->SetBoolField(TEXT("success"), true);
             return ResultObj;
         }
     }
@@ -1270,6 +1283,8 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActorByClass(const 
 
     FActorSpawnParameters SpawnParams;
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    // Never use Required_Fatal for MCP-chosen names — name collisions must return JSON errors, not crash the Editor.
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
     if (!ActorName.IsEmpty())
     {
         SpawnParams.Name = FName(*ActorName);
@@ -1278,10 +1293,17 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActorByClass(const 
     AActor* NewActor = World->SpawnActor<AActor>(ActorClass, Location, Rotation, SpawnParams);
     if (!NewActor)
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to spawn actor"));
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            ActorName.IsEmpty()
+                ? TEXT("Failed to spawn actor")
+                : FString::Printf(TEXT("Failed to spawn actor (name '%s' may already be in use)"), *ActorName));
     }
 
     NewActor->SetActorScale3D(Scale);
+    if (!ActorName.IsEmpty())
+    {
+        NewActor->SetActorLabel(*ActorName);
+    }
 
     TSharedPtr<FJsonObject> ResultObj = FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
     ResultObj->SetBoolField(TEXT("success"), true);
@@ -1488,21 +1510,53 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
     }
 
+    // Guard name collisions up front (delete+respawn races used to hit a fatal check in LevelActor.cpp).
+    {
+        TArray<AActor*> AllActors;
+        UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
+        for (AActor* Existing : AllActors)
+        {
+            if (Existing && !Existing->IsActorBeingDestroyed() && Existing->GetName() == ActorName)
+            {
+                return FUnrealMCPCommonUtils::CreateErrorResponse(
+                    FString::Printf(
+                        TEXT("Actor with name '%s' already exists. Delete it first or choose a unique actor_name."),
+                        *ActorName));
+            }
+        }
+    }
+
+    if (!Blueprint->GeneratedClass)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Blueprint '%s' has no GeneratedClass (compile it first)"), *BlueprintName));
+    }
+
     FTransform SpawnTransform;
     SpawnTransform.SetLocation(Location);
     SpawnTransform.SetRotation(FQuat(Rotation));
     SpawnTransform.SetScale3D(Scale);
 
     FActorSpawnParameters SpawnParams;
-    SpawnParams.Name = *ActorName;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    // Critical: default NameMode is Required_Fatal and will crash the Editor on name collision.
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
+    SpawnParams.Name = FName(*ActorName);
 
     AActor* NewActor = World->SpawnActor<AActor>(Blueprint->GeneratedClass, SpawnTransform, SpawnParams);
     if (NewActor)
     {
-        return FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
+        NewActor->SetActorLabel(*ActorName);
+        TSharedPtr<FJsonObject> ResultObj = FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
+        ResultObj->SetBoolField(TEXT("success"), true);
+        return ResultObj;
     }
 
-    return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to spawn blueprint actor"));
+    return FUnrealMCPCommonUtils::CreateErrorResponse(
+        FString::Printf(
+            TEXT("Failed to spawn blueprint actor '%s' (name '%s' may already be in use or class failed to spawn)"),
+            *BlueprintName,
+            *ActorName));
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleFocusViewport(const TSharedPtr<FJsonObject>& Params)

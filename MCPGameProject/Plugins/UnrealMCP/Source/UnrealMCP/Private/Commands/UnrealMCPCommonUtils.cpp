@@ -751,6 +751,122 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
             }
         }
     }
+    else if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+    {
+        // Common engine structs used by components / actors
+        if (StructProp->Struct == TBaseStructure<FVector>::Get())
+        {
+            FVector Vec = FVector::ZeroVector;
+            if (Value->Type == EJson::Array)
+            {
+                const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+                if (Value->TryGetArray(Arr) && Arr && Arr->Num() >= 3)
+                {
+                    Vec.X = static_cast<float>((*Arr)[0]->AsNumber());
+                    Vec.Y = static_cast<float>((*Arr)[1]->AsNumber());
+                    Vec.Z = static_cast<float>((*Arr)[2]->AsNumber());
+                }
+                else
+                {
+                    OutErrorMessage = FString::Printf(TEXT("Vector property '%s' expects [X,Y,Z]"), *PropertyName);
+                    return false;
+                }
+            }
+            else if (Value->Type == EJson::Object)
+            {
+                const TSharedPtr<FJsonObject>* Obj = nullptr;
+                if (Value->TryGetObject(Obj) && Obj)
+                {
+                    Vec.X = static_cast<float>((*Obj)->GetNumberField(TEXT("X")));
+                    Vec.Y = static_cast<float>((*Obj)->GetNumberField(TEXT("Y")));
+                    Vec.Z = static_cast<float>((*Obj)->GetNumberField(TEXT("Z")));
+                }
+            }
+            else if (Value->Type == EJson::String)
+            {
+                StructProp->ImportText_Direct(*Value->AsString(), PropertyAddr, Object, PPF_None);
+                return true;
+            }
+            else
+            {
+                OutErrorMessage = FString::Printf(TEXT("Unsupported JSON type for Vector property '%s'"), *PropertyName);
+                return false;
+            }
+            *static_cast<FVector*>(PropertyAddr) = Vec;
+            return true;
+        }
+
+        if (StructProp->Struct == TBaseStructure<FRotator>::Get())
+        {
+            FRotator Rot = FRotator::ZeroRotator;
+            if (Value->Type == EJson::Array)
+            {
+                // Accept [Pitch, Yaw, Roll] (Unreal order)
+                const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+                if (Value->TryGetArray(Arr) && Arr && Arr->Num() >= 3)
+                {
+                    Rot.Pitch = static_cast<float>((*Arr)[0]->AsNumber());
+                    Rot.Yaw = static_cast<float>((*Arr)[1]->AsNumber());
+                    Rot.Roll = static_cast<float>((*Arr)[2]->AsNumber());
+                }
+                else
+                {
+                    OutErrorMessage = FString::Printf(TEXT("Rotator property '%s' expects [Pitch,Yaw,Roll]"), *PropertyName);
+                    return false;
+                }
+            }
+            else if (Value->Type == EJson::Object)
+            {
+                const TSharedPtr<FJsonObject>* Obj = nullptr;
+                if (Value->TryGetObject(Obj) && Obj)
+                {
+                    // Prefer named fields; also allow X/Y/Z as Pitch/Yaw/Roll aliases
+                    if ((*Obj)->HasField(TEXT("Pitch")) || (*Obj)->HasField(TEXT("Yaw")) || (*Obj)->HasField(TEXT("Roll")))
+                    {
+                        Rot.Pitch = static_cast<float>((*Obj)->GetNumberField(TEXT("Pitch")));
+                        Rot.Yaw = static_cast<float>((*Obj)->GetNumberField(TEXT("Yaw")));
+                        Rot.Roll = static_cast<float>((*Obj)->GetNumberField(TEXT("Roll")));
+                    }
+                    else
+                    {
+                        Rot.Pitch = static_cast<float>((*Obj)->GetNumberField(TEXT("X")));
+                        Rot.Yaw = static_cast<float>((*Obj)->GetNumberField(TEXT("Y")));
+                        Rot.Roll = static_cast<float>((*Obj)->GetNumberField(TEXT("Z")));
+                    }
+                }
+            }
+            else if (Value->Type == EJson::String)
+            {
+                StructProp->ImportText_Direct(*Value->AsString(), PropertyAddr, Object, PPF_None);
+                return true;
+            }
+            else
+            {
+                OutErrorMessage = FString::Printf(TEXT("Unsupported JSON type for Rotator property '%s'"), *PropertyName);
+                return false;
+            }
+            *static_cast<FRotator*>(PropertyAddr) = Rot;
+            return true;
+        }
+
+        // Generic struct import from export-text string
+        if (Value->Type == EJson::String)
+        {
+            const TCHAR* Result = StructProp->ImportText_Direct(*Value->AsString(), PropertyAddr, Object, PPF_None);
+            if (Result)
+            {
+                return true;
+            }
+            OutErrorMessage = FString::Printf(TEXT("Failed to import struct property '%s' from string"), *PropertyName);
+            return false;
+        }
+
+        OutErrorMessage = FString::Printf(
+            TEXT("Unsupported struct property '%s' (type %s). Pass a string export-text or a known Vector/Rotator shape."),
+            *PropertyName,
+            StructProp->Struct ? *StructProp->Struct->GetName() : TEXT("unknown"));
+        return false;
+    }
     
     OutErrorMessage = FString::Printf(TEXT("Unsupported property type: %s for property %s"), 
                                     *Property->GetClass()->GetName(), *PropertyName);
