@@ -9,3 +9,4 @@ This document is an index to all the tools supported.
 - [Material Tools](material_tools.md)
 - [Project Tools](project_tools.md)
 - [UMG Tools](umg_tools.md)
+- [Plugin sync / upgrade](plugin_sync.md) — install or refresh the editor plugin into a target Unreal project

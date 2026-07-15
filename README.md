@@ -64,13 +64,30 @@ Validated in practice on Unreal Engine `5.7`, while still targeting `5.5+`.
 
 ### Option B: Reuse in your own Unreal project
 
-1. Copy [UnrealMCP](MCPGameProject/Plugins/UnrealMCP) into your Unreal project's `Plugins/` directory.
+**Preferred:** use the sync script (avoids stale manual copies):
+
+```powershell
+# From the repository root — Source mode (then rebuild Editor):
+.\Scripts\sync_unreal_mcp_plugin.ps1 -TargetProject "C:\Path\To\YourGame.uproject" -Mode Source
+
+# Or install a matching prebuilt package:
+.\Scripts\sync_unreal_mcp_plugin.ps1 -TargetProject "C:\Path\To\YourGame.uproject" -Mode Release -EngineVersion 5.7
+
+# Drift report only:
+.\Scripts\sync_unreal_mcp_plugin.ps1 -TargetProject "C:\Path\To\YourGame.uproject" -Mode Status
+```
+
+Details: [Docs/Tools/plugin_sync.md](Docs/Tools/plugin_sync.md).
+
+Manual equivalent:
+
+1. Copy [UnrealMCP](MCPGameProject/Plugins/UnrealMCP) into your Unreal project's `Plugins/` directory (or extract a zip from [Releases/UnrealMCP](Releases/UnrealMCP)).
 2. Enable the plugin in Unreal Editor if it is not already enabled.
-3. Generate project files for your `.uproject`.
-4. Build your Editor target so the plugin is compiled against that project.
+3. Generate project files for your `.uproject` (Source installs).
+4. Build your Editor target so the plugin is compiled against that project (Source installs).
 5. Run the shared Python MCP server from the repository's [Python](Python) directory.
 
-This reuse model is the intended workflow. The plugin changes in this repository are not tied to any single project path or asset set.
+This reuse model is the intended workflow. The plugin changes in this repository are not tied to any single project path or asset set. After pulling plugin changes, re-run the sync script (or re-copy), rebuild if needed, and **fully restart** the Editor.
 
 ## Python Server Setup
 
