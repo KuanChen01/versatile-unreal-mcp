@@ -185,7 +185,7 @@ def register_material_tools(mcp: FastMCP):
         material_path: str,
         graph_spec: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Atomically rebuild a material graph from a declarative graph spec."""
+        """DESTRUCTIVE: atomically rebuild a material graph from a declarative graph spec."""
         return _send_material_command("rebuild_material_graph", {
             "material_path": material_path,
             "graph_spec": graph_spec,

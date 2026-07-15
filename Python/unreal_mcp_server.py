@@ -346,6 +346,7 @@ from tools.node_tools import register_blueprint_node_tools
 from tools.material_tools import register_material_tools
 from tools.project_tools import register_project_tools
 from tools.umg_tools import register_umg_tools
+from tools.workflow_tools import register_workflow_tools
 
 # Register tools
 register_editor_tools(mcp)
@@ -354,6 +355,7 @@ register_blueprint_node_tools(mcp)
 register_material_tools(mcp)
 register_project_tools(mcp)
 register_umg_tools(mcp)
+register_workflow_tools(mcp)
 
 
 @mcp.prompt()
@@ -364,6 +366,17 @@ def info():
 
     Bridge protocol version: {PROTOCOL_VERSION} (length-prefixed JSON frames).
     The UnrealMCP editor plugin and this Python server must be upgraded together.
+
+    ## Agent policy (read first)
+    1. Call `editor_preflight` (or `get_bridge_status`) before mutating the level or assets.
+    2. Prefer **composite workflow tools** when they match the job:
+       - `editor_preflight` — bridge/level/viewport readiness
+       - `spawn_actor_with_material` — spawn by class + assign material
+       - `create_and_rebuild_material` — create material + atomic graph rebuild
+       - `create_blueprint_with_graph` — create BP + atomic event graph rebuild
+    3. Prefer atomic graph rebuilds (`rebuild_material_graph`, `rebuild_blueprint_graph`) over many add_*/connect_* calls.
+    4. Use **unique actor names**. Never delete+respawn with the same name unless delete succeeded and the name is free.
+    5. Tools marked DESTRUCTIVE change the project; confirm intent before chaining them.
 
     ## UMG (Widget Blueprint) Tools
     - `create_umg_widget_blueprint(widget_name, parent_class="UserWidget", path="/Game/UI")`
@@ -434,10 +447,17 @@ def info():
     ## Project Tools
     - `create_input_mapping(action_name, key, input_type)` - Create input mappings
 
+    ## Workflow tools (prefer these over long tool chains)
+    - `editor_preflight()` - Bridge + level + viewport readiness
+    - `spawn_actor_with_material(class_path, material_path, name="", ...)` - Spawn + assign material
+    - `create_and_rebuild_material(material_path, graph_spec, validate=True)` - Create + atomic material graph
+    - `create_blueprint_with_graph(name, graph_spec, parent_class="Actor", ...)` - Create + atomic BP graph
+
     ## Best Practices
-    - Prefer `get_bridge_status` before large mutation sequences
+    - Call `editor_preflight` (or `get_bridge_status`) before large mutation sequences
+    - Prefer atomic rebuild APIs and workflow tools over many fine-grained steps
     - Compile Blueprints after graph changes
-    - Use unique actor names and clean up temporary actors
+    - Use unique actor names; never force-reuse names that may still exist
     - Take screenshots to verify viewport state
     """
 

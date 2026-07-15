@@ -95,7 +95,7 @@ def register_project_tools(mcp: FastMCP):
         asset_path: str,
     ) -> Dict[str, Any]:
         """
-        Delete a content asset by package path.
+        DESTRUCTIVE: permanently delete a content asset by package path.
 
         Args:
             asset_path: Package path such as /Game/MCP_Smoke/M_Smoke_Test

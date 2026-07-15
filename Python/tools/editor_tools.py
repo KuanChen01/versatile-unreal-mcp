@@ -263,7 +263,7 @@ def register_editor_tools(mcp: FastMCP):
 
     @mcp.tool()
     def delete_actor(ctx: Context, name: str) -> Dict[str, Any]:
-        """Delete an actor by name."""
+        """DESTRUCTIVE: permanently delete a level actor by name."""
         return run_bridge_command("delete_actor", {"name": name})
 
     @mcp.tool()

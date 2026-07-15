@@ -189,7 +189,8 @@ def register_blueprint_node_tools(mcp: FastMCP):
         compile: bool = True,
     ) -> Dict[str, Any]:
         """
-        Atomically author a Blueprint Event Graph from a declarative graph_spec (v1).
+        DESTRUCTIVE when clear_event_graph=true: rewrites the Blueprint Event Graph
+        from a declarative graph_spec (v1).
 
         Prefer this over many add_*/connect_* calls. Local node ids in the spec are
         mapped to real NodeGuid values in the response (id_to_node_id).
