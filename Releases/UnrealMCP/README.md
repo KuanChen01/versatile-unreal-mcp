@@ -45,23 +45,17 @@ The Unreal plugin listens on `127.0.0.1:55557` by default. The Python server spe
 
 ## Verify after install
 
-With the Editor open:
+With the Editor open, from this repo's `Python/` directory:
 
 ```powershell
-uv --directory D:\MCP\Unreal\Python run python scripts/smoke/editor_smoke.py
+uv run python -c "from bridge_client import run_bridge_command; print(run_bridge_command('get_bridge_status'))"
 ```
 
-Or at least:
-
-```powershell
-uv --directory D:\MCP\Unreal\Python run python -c "from bridge_client import run_bridge_command; print(run_bridge_command('get_bridge_status'))"
-```
-
-Expect `protocol_version: "2.0"` and `success: true`. Full smoke is **9** cases when Editor + plugin match this package.
+Expect `protocol_version: "2.0"` and `success: true`.
 
 ## Rebuild notes
 
-Packages were produced with Epic `RunUAT BuildPlugin` from `MCPGameProject/Plugins/UnrealMCP`, Win64 Editor Development, engines under `D:\Software\Unreal\UE_5.5` / `UE_5.6` / `UE_5.7`.
+Packages were produced with Epic `RunUAT BuildPlugin` from `MCPGameProject/Plugins/UnrealMCP`, Win64 Editor Development, against installed Unreal Engine `5.5` / `5.6` / `5.7` builds.
 
 Each zip root is `UnrealMCP/` (`Binaries/Win64` + `Source` + `.uplugin`).
 

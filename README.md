@@ -291,11 +291,15 @@ This fork has been exercised end-to-end with:
 - material creation through `create_material`
 - glass graph generation through `configure_glass_material`
 - assigning the generated material to a sphere in a test level
-- **editor smoke suite** (`Python/scripts/smoke/editor_smoke.py`): bridge/protocol gate, spawn+screenshot, material rebuild/validate, blueprint compile, unknown-command rewrite (live `OW_CarScene_57` / UE 5.7)
+- live bridge checks via `get_bridge_status` / `ping` (protocol **2.0**) after install
+
+With the Editor open and the plugin listening:
 
 ```bash
-uv --directory Python run python scripts/smoke/editor_smoke.py
+uv --directory Python run python -c "from bridge_client import run_bridge_command; print(run_bridge_command('get_bridge_status'))"
 ```
+
+Expect `protocol_version: "2.0"` and `success: true`.
 
 ## Development Notes
 
