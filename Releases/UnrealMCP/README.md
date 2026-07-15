@@ -21,13 +21,16 @@ Checksums: see `SHA256SUMS.txt`.
 
 ## Package contents (this refresh)
 
-Includes HEAD plugin features as of **2026-07-15**:
+Includes plugin features as of **2026-07-15** (HEAD at rebuild, includes `bf4cba6` safety fixes):
 
 - Protocol 2.0 framing + hard handshake surface
 - P1 tools: `find_assets`, `get_asset_info`, `delete_asset`, `spawn_actor_by_class`, `assign_material_to_actor`
 - Multi-instance env: `UNREAL_MCP_HOST` / `UNREAL_MCP_PORT`
 - Blueprint atomic graph: `rebuild_blueprint_graph`, `batch_connect_blueprint_nodes`
 - graph_spec expand: `branch`, `cast`, `custom_event`, `timeline` + pin aliases
+- **Spawn safety:** duplicate actor names return JSON errors (do not Fatal the Editor)
+- **Delete:** uses `EditorDestroyActor` so names can be reused more reliably
+- **Properties:** `FVector` / `FRotator` component property writes (e.g. `RotationRate`)
 
 ## Manual install
 
@@ -59,4 +62,4 @@ Packages were produced with Epic `RunUAT BuildPlugin` from `MCPGameProject/Plugi
 
 Each zip root is `UnrealMCP/` (`Binaries/Win64` + `Source` + `.uplugin`).
 
-Last refreshed: **2026-07-15** (P1 + BP graph expand).
+Last refreshed: **2026-07-15** (P1 + graph expand + spawn/property safety).
