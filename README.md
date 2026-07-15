@@ -30,7 +30,7 @@ Validated in practice on Unreal Engine `5.7`, while still targeting `5.5+`.
 | Actor Management | List/find actors, spawn built-in or **by class/Blueprint**, delete, transform, properties, **assign material to mesh slots** |
 | Asset Registry | **find_assets**, get_asset_info, delete_asset (Content Browser search) |
 | Blueprint Authoring | Create Blueprints, add components, set mesh and physics properties, compile, set defaults, spawn Blueprint actors |
-| Blueprint Graph Editing | Add event nodes, input nodes, function nodes, self/component references, variables, and connect graph pins |
+| Blueprint Graph Editing | Incremental node tools **plus** atomic `rebuild_blueprint_graph` / `batch_connect_blueprint_nodes` (local ids, variables, compile) |
 | Material Authoring | Create materials, rebuild material graphs atomically, use stable node refs, validate/compile graphs, manage asset cache state, create/reuse Material Functions, build glass/chrome workflows |
 | UMG Authoring | Create widget Blueprints, add text blocks and buttons, bind widget events, add widgets to viewport |
 | Editor Utilities | Inspect live bridge/editor status, manage levels and play sessions, query viewport readiness, capture logs, focus the viewport, and take screenshots |

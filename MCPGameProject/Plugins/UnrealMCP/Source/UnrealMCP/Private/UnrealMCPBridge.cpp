@@ -126,7 +126,9 @@ namespace
             TEXT("add_blueprint_input_action_node"),
             TEXT("add_blueprint_function_node"),
             TEXT("add_blueprint_get_component_node"),
-            TEXT("add_blueprint_variable")
+            TEXT("add_blueprint_variable"),
+            TEXT("rebuild_blueprint_graph"),
+            TEXT("batch_connect_blueprint_nodes")
         };
         return CommandTypes;
     }

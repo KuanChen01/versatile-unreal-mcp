@@ -97,6 +97,8 @@ _HEAVY_COMMANDS: Set[str] = {
     "validate_material_graph",
     "configure_glass_material",
     "get_material_compile_status",
+    "rebuild_blueprint_graph",
+    "compile_blueprint",
 }
 
 _EDITOR_IO_COMMANDS: Set[str] = {

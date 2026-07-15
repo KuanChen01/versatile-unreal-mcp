@@ -180,4 +180,70 @@ def register_blueprint_node_tools(mcp: FastMCP):
             },
         )
 
+    @mcp.tool()
+    def rebuild_blueprint_graph(
+        ctx: Context,
+        blueprint_name: str,
+        graph_spec: Dict[str, Any],
+        clear_event_graph: bool = False,
+        compile: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Atomically author a Blueprint Event Graph from a declarative graph_spec (v1).
+
+        Prefer this over many add_*/connect_* calls. Local node ids in the spec are
+        mapped to real NodeGuid values in the response (id_to_node_id).
+
+        graph_spec shape::
+
+            {
+              "version": 1,
+              "options": {"clear_event_graph": false, "compile": true},
+              "variables": [{"name": "Speed", "type": "Float", "is_exposed": false}],
+              "nodes": [
+                {"id": "begin", "type": "event", "event_name": "ReceiveBeginPlay", "position": [0, 0]},
+                {"id": "print", "type": "function", "target": "KismetSystemLibrary",
+                 "function_name": "PrintString", "position": [300, 0],
+                 "params": {"InString": "Hello"}}
+              ],
+              "connections": [
+                {"from": {"node": "begin", "pin": "then"}, "to": {"node": "print", "pin": "execute"}}
+              ]
+            }
+
+        Supported node types: event, function, self, input_action, get_component,
+        variable_get, variable_set.
+        """
+        params: Dict[str, Any] = {
+            "blueprint_name": blueprint_name,
+            "graph_spec": graph_spec,
+            "clear_event_graph": clear_event_graph,
+            "compile": compile,
+        }
+        return run_bridge_command("rebuild_blueprint_graph", params)
+
+    @mcp.tool()
+    def batch_connect_blueprint_nodes(
+        ctx: Context,
+        blueprint_name: str,
+        connections: list,
+        id_to_node_id: Dict[str, str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Batch-connect nodes by local id (with id_to_node_id map) or by NodeGuid.
+
+        Each connection may use::
+
+            {"from": {"node": "...", "pin": "then"}, "to": {"node": "...", "pin": "execute"}}
+
+        or the flat shape from connect_blueprint_nodes.
+        """
+        params: Dict[str, Any] = {
+            "blueprint_name": blueprint_name,
+            "connections": connections or [],
+        }
+        if id_to_node_id:
+            params["id_to_node_id"] = id_to_node_id
+        return run_bridge_command("batch_connect_blueprint_nodes", params)
+
     logger.info("Blueprint node tools registered successfully")
