@@ -212,7 +212,9 @@ def register_blueprint_node_tools(mcp: FastMCP):
             }
 
         Supported node types: event, function, self, input_action, get_component,
-        variable_get, variable_set.
+        variable_get, variable_set, branch (if), cast, custom_event, timeline.
+        Pin aliases: true/then, false/else, exec/execute, cond/Condition, as (cast result).
+        See Docs/Tools/blueprint_graph_spec.md.
         """
         params: Dict[str, Any] = {
             "blueprint_name": blueprint_name,
