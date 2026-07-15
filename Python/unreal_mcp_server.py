@@ -347,6 +347,7 @@ from tools.material_tools import register_material_tools
 from tools.project_tools import register_project_tools
 from tools.umg_tools import register_umg_tools
 from tools.workflow_tools import register_workflow_tools
+from tools.mcp_resources import register_mcp_resources
 
 # Register tools
 register_editor_tools(mcp)
@@ -356,6 +357,7 @@ register_material_tools(mcp)
 register_project_tools(mcp)
 register_umg_tools(mcp)
 register_workflow_tools(mcp)
+register_mcp_resources(mcp)
 
 
 @mcp.prompt()
@@ -367,8 +369,19 @@ def info():
     Bridge protocol version: {PROTOCOL_VERSION} (length-prefixed JSON frames).
     The UnrealMCP editor plugin and this Python server must be upgraded together.
 
+    ## MCP Resources (read-only — prefer before tools when planning)
+    - `unreal://protocol` — static protocol contract (no Editor required)
+    - `unreal://bridge/status` — live bridge / plugin / command groups
+    - `unreal://level/status` — current map, dirty flag, actor count
+    - `unreal://viewport/status` — viewport readiness
+    - `unreal://play/state` — PIE/SIE state
+    - `unreal://actors/list` — actors in the current level
+    - `unreal://preflight` — composite readiness snapshot
+    - `unreal://assets/find/{{query}}` — asset search under /Game (use `_` for broad sample)
+    - `unreal://asset/info/{{package_path}}` — one asset; encode path with dashes (Game-Foo-Bar → /Game/Foo/Bar)
+
     ## Agent policy (read first)
-    1. Call `editor_preflight` (or `get_bridge_status`) before mutating the level or assets.
+    1. Read `unreal://preflight` or call `editor_preflight` / `get_bridge_status` before mutating.
     2. Prefer **composite workflow tools** when they match the job:
        - `editor_preflight` — bridge/level/viewport readiness
        - `spawn_actor_with_material` — spawn by class + assign material

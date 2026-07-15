@@ -11,3 +11,4 @@ This document is an index to all the tools supported.
 - [UMG Tools](umg_tools.md)
 - [Plugin sync / upgrade](plugin_sync.md) — install or refresh the editor plugin into a target Unreal project
 - [Workflow tools](workflow_tools.md) — composite agent recipes (`editor_preflight`, spawn+material, material/BP rebuild)
+- [MCP Resources](mcp_resources.md) — read-only URIs (`unreal://bridge/status`, preflight, actors, assets, …)
