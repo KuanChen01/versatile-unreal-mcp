@@ -2,6 +2,7 @@
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/TimelineTemplate.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -11,10 +12,18 @@
 #include "K2Node_VariableSet.h"
 #include "K2Node_InputAction.h"
 #include "K2Node_Self.h"
+#include "K2Node_IfThenElse.h"
+#include "K2Node_DynamicCast.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_Timeline.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "GameFramework/InputSettings.h"
 #include "Camera/CameraActor.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "EdGraphSchema_K2.h"
 
@@ -963,6 +972,27 @@ UClass* FUnrealMCPBlueprintNodeCommands::ResolveFunctionTargetClass(const FStrin
         return nullptr;
     }
 
+    // Full object/class path first
+    if (Target.StartsWith(TEXT("/")))
+    {
+        if (UClass* Loaded = LoadObject<UClass>(nullptr, *Target))
+        {
+            return Loaded;
+        }
+        // Blueprint generated class path ending in _C
+        if (UObject* Obj = StaticLoadObject(UObject::StaticClass(), nullptr, *Target))
+        {
+            if (UClass* AsClass = Cast<UClass>(Obj))
+            {
+                return AsClass;
+            }
+            if (UBlueprint* AsBP = Cast<UBlueprint>(Obj))
+            {
+                return AsBP->GeneratedClass;
+            }
+        }
+    }
+
     UClass* TargetClass = FindFirstObjectSafe<UClass>(*Target);
     if (!TargetClass && !Target.StartsWith(TEXT("U")))
     {
@@ -983,6 +1013,23 @@ UClass* FUnrealMCPBlueprintNodeCommands::ResolveFunctionTargetClass(const FStrin
     if (!TargetClass && Target.Contains(TEXT("KismetMathLibrary")))
     {
         TargetClass = LoadObject<UClass>(nullptr, TEXT("/Script/Engine.KismetMathLibrary"));
+    }
+    // Common cast aliases
+    if (!TargetClass && (Target.Equals(TEXT("Actor"), ESearchCase::IgnoreCase) || Target == TEXT("AActor")))
+    {
+        TargetClass = AActor::StaticClass();
+    }
+    if (!TargetClass && (Target.Equals(TEXT("Pawn"), ESearchCase::IgnoreCase) || Target == TEXT("APawn")))
+    {
+        TargetClass = APawn::StaticClass();
+    }
+    if (!TargetClass && (Target.Equals(TEXT("Character"), ESearchCase::IgnoreCase) || Target == TEXT("ACharacter")))
+    {
+        TargetClass = ACharacter::StaticClass();
+    }
+    if (!TargetClass && (Target.Equals(TEXT("PlayerController"), ESearchCase::IgnoreCase) || Target == TEXT("APlayerController")))
+    {
+        TargetClass = APlayerController::StaticClass();
     }
     return TargetClass;
 }
@@ -1295,8 +1342,156 @@ UEdGraphNode* FUnrealMCPBlueprintNodeCommands::CreateNodeFromSpec(
         return Node;
     }
 
+    // Branch / IfThenElse — exec out pins: then (true), else (false)
+    if (TypeLower == TEXT("branch") || TypeLower == TEXT("if") || TypeLower == TEXT("if_then_else"))
+    {
+        UK2Node_IfThenElse* BranchNode = NewObject<UK2Node_IfThenElse>(EventGraph);
+        BranchNode->NodePosX = Position.X;
+        BranchNode->NodePosY = Position.Y;
+        EventGraph->AddNode(BranchNode);
+        BranchNode->CreateNewGuid();
+        BranchNode->PostPlacedNewNode();
+        BranchNode->AllocateDefaultPins();
+
+        // Optional default Condition pin value
+        if (NodeSpec->HasField(TEXT("condition")))
+        {
+            const bool bCond = NodeSpec->GetBoolField(TEXT("condition"));
+            if (UEdGraphPin* CondPin = FUnrealMCPCommonUtils::FindPin(BranchNode, TEXT("Condition"), EGPD_Input))
+            {
+                CondPin->DefaultValue = bCond ? TEXT("true") : TEXT("false");
+            }
+        }
+        return BranchNode;
+    }
+
+    // Dynamic cast — TargetType from class / target_class / cast_class
+    if (TypeLower == TEXT("cast") || TypeLower == TEXT("dynamic_cast") || TypeLower == TEXT("cast_to"))
+    {
+        FString ClassName;
+        if (!NodeSpec->TryGetStringField(TEXT("class"), ClassName))
+        {
+            if (!NodeSpec->TryGetStringField(TEXT("target_class"), ClassName))
+            {
+                NodeSpec->TryGetStringField(TEXT("cast_class"), ClassName);
+            }
+        }
+        if (ClassName.IsEmpty())
+        {
+            OutError = FString::Printf(TEXT("cast node '%s' requires class / target_class"), *OutLocalId);
+            return nullptr;
+        }
+
+        UClass* TargetClass = ResolveFunctionTargetClass(ClassName);
+        if (!TargetClass)
+        {
+            OutError = FString::Printf(TEXT("cast node '%s' could not resolve class '%s'"), *OutLocalId, *ClassName);
+            return nullptr;
+        }
+
+        UK2Node_DynamicCast* CastNode = NewObject<UK2Node_DynamicCast>(EventGraph);
+        CastNode->TargetType = TargetClass;
+        bool bPure = false;
+        if (NodeSpec->HasField(TEXT("pure")))
+        {
+            bPure = NodeSpec->GetBoolField(TEXT("pure"));
+        }
+        CastNode->SetPurity(bPure);
+        CastNode->NodePosX = Position.X;
+        CastNode->NodePosY = Position.Y;
+        EventGraph->AddNode(CastNode);
+        CastNode->CreateNewGuid();
+        CastNode->PostPlacedNewNode();
+        CastNode->AllocateDefaultPins();
+        CastNode->ReconstructNode();
+        return CastNode;
+    }
+
+    // Custom event (user-defined event name on this Blueprint)
+    if (TypeLower == TEXT("custom_event") || TypeLower == TEXT("custom") || TypeLower == TEXT("event_custom"))
+    {
+        FString EventName;
+        if (!NodeSpec->TryGetStringField(TEXT("event_name"), EventName))
+        {
+            NodeSpec->TryGetStringField(TEXT("name"), EventName);
+        }
+        if (EventName.IsEmpty())
+        {
+            OutError = FString::Printf(TEXT("custom_event node '%s' missing event_name"), *OutLocalId);
+            return nullptr;
+        }
+
+        // Reuse existing custom event with same name when not clearing
+        for (UEdGraphNode* ExistingNode : EventGraph->Nodes)
+        {
+            if (UK2Node_CustomEvent* ExistingCustom = Cast<UK2Node_CustomEvent>(ExistingNode))
+            {
+                if (ExistingCustom->CustomFunctionName == FName(*EventName))
+                {
+                    ExistingCustom->NodePosX = Position.X;
+                    ExistingCustom->NodePosY = Position.Y;
+                    return ExistingCustom;
+                }
+            }
+        }
+
+        UK2Node_CustomEvent* CustomEvent = NewObject<UK2Node_CustomEvent>(EventGraph);
+        CustomEvent->CustomFunctionName = FName(*EventName);
+        CustomEvent->NodePosX = Position.X;
+        CustomEvent->NodePosY = Position.Y;
+        EventGraph->AddNode(CustomEvent);
+        CustomEvent->CreateNewGuid();
+        CustomEvent->PostPlacedNewNode();
+        CustomEvent->AllocateDefaultPins();
+        return CustomEvent;
+    }
+
+    // Timeline node (+ ensure UTimelineTemplate on the Blueprint)
+    if (TypeLower == TEXT("timeline"))
+    {
+        FString TimelineName = TEXT("Timeline");
+        if (!NodeSpec->TryGetStringField(TEXT("timeline_name"), TimelineName))
+        {
+            NodeSpec->TryGetStringField(TEXT("name"), TimelineName);
+        }
+        if (TimelineName.IsEmpty())
+        {
+            TimelineName = TEXT("Timeline");
+        }
+
+        UTimelineTemplate* TimelineTemplate = nullptr;
+        for (UTimelineTemplate* Existing : Blueprint->Timelines)
+        {
+            if (Existing && Existing->GetVariableName() == FName(*TimelineName))
+            {
+                TimelineTemplate = Existing;
+                break;
+            }
+        }
+        if (!TimelineTemplate)
+        {
+            TimelineTemplate = FBlueprintEditorUtils::AddNewTimeline(Blueprint, FName(*TimelineName));
+        }
+        if (!TimelineTemplate)
+        {
+            OutError = FString::Printf(TEXT("Failed to create timeline template '%s'"), *TimelineName);
+            return nullptr;
+        }
+
+        UK2Node_Timeline* TimelineNode = NewObject<UK2Node_Timeline>(EventGraph);
+        TimelineNode->TimelineName = TimelineTemplate->GetVariableName();
+        TimelineNode->NodePosX = Position.X;
+        TimelineNode->NodePosY = Position.Y;
+        EventGraph->AddNode(TimelineNode);
+        TimelineNode->CreateNewGuid();
+        TimelineNode->PostPlacedNewNode();
+        TimelineNode->AllocateDefaultPins();
+        TimelineNode->ReconstructNode();
+        return TimelineNode;
+    }
+
     OutError = FString::Printf(
-        TEXT("Unsupported node type '%s' on id '%s'. Supported: event, function, self, input_action, get_component, variable_get, variable_set"),
+        TEXT("Unsupported node type '%s' on id '%s'. Supported: event, function, self, input_action, get_component, variable_get, variable_set, branch, cast, custom_event, timeline"),
         *NodeType, *OutLocalId);
     return nullptr;
 }
@@ -1376,32 +1571,119 @@ bool FUnrealMCPBlueprintNodeCommands::ConnectByLocalIds(
         return false;
     }
 
-    if (!FUnrealMCPCommonUtils::ConnectGraphNodes(EventGraph, Source, SourcePin, Target, TargetPin))
+    // Expand friendly pin names once so branch/cast/timeline are less brittle for agents.
+    auto ExpandPinAliases = [](const FString& Pin) -> TArray<FString>
     {
-        // Try common exec pin aliases
-        const TArray<TPair<FString, FString>> Aliases = {
-            {TEXT("then"), TEXT("execute")},
-            {TEXT("execute"), TEXT("then")},
-            {TEXT("Then"), TEXT("execute")},
-            {TEXT("Execute"), TEXT("then")},
-        };
-        bool bConnected = false;
-        for (const auto& Alias : Aliases)
+        TArray<FString> Names;
+        Names.Add(Pin);
+        const FString Lower = Pin.ToLower();
+
+        if (Lower == TEXT("then") || Lower == TEXT("true") || Lower == TEXT("then0") || Lower == TEXT("success"))
         {
-            if (SourcePin.Equals(Alias.Key, ESearchCase::IgnoreCase) || TargetPin.Equals(Alias.Value, ESearchCase::IgnoreCase))
+            Names.Append({TEXT("then"), TEXT("True"), TEXT("true"), TEXT("then0")});
+        }
+        else if (Lower == TEXT("else") || Lower == TEXT("false") || Lower == TEXT("then1") || Lower == TEXT("fail") || Lower == TEXT("failed") || Lower == TEXT("castfailed"))
+        {
+            Names.Append({TEXT("else"), TEXT("False"), TEXT("false"), TEXT("then1"), TEXT("CastFailed")});
+        }
+        else if (Lower == TEXT("execute") || Lower == TEXT("exec") || Lower == TEXT("in") || Lower == TEXT("execin"))
+        {
+            Names.Append({TEXT("execute"), TEXT("Execute"), TEXT("exec")});
+        }
+        else if (Lower == TEXT("condition") || Lower == TEXT("cond") || Lower == TEXT("bool"))
+        {
+            Names.Append({TEXT("Condition"), TEXT("condition")});
+        }
+        else if (Lower == TEXT("object") || Lower == TEXT("self") || Lower == TEXT("target") || Lower == TEXT("castobject"))
+        {
+            // Dynamic cast object input is often "Object"
+            Names.Append({TEXT("Object"), TEXT("self"), TEXT("Target")});
+        }
+        else if (Lower == TEXT("as") || Lower == TEXT("result") || Lower == TEXT("returnvalue") || Lower == TEXT("castresult"))
+        {
+            // Cast success object out pin name is often "As<Class>" — match later via FindPin fallbacks
+            Names.Append({TEXT("ReturnValue"), TEXT("as")});
+        }
+        else if (Lower == TEXT("update") || Lower == TEXT("updatefunc") || Lower == TEXT("tick"))
+        {
+            Names.Append({TEXT("Update"), TEXT("update")});
+        }
+        else if (Lower == TEXT("finished") || Lower == TEXT("finish") || Lower == TEXT("completed"))
+        {
+            Names.Append({TEXT("Finished"), TEXT("finished")});
+        }
+        else if (Lower == TEXT("play") || Lower == TEXT("playfromstart"))
+        {
+            Names.Append({TEXT("Play"), TEXT("PlayFromStart")});
+        }
+
+        // Dedup while preserving order
+        TArray<FString> Unique;
+        for (const FString& N : Names)
+        {
+            Unique.AddUnique(N);
+        }
+        return Unique;
+    };
+
+    bool bConnected = FUnrealMCPCommonUtils::ConnectGraphNodes(EventGraph, Source, SourcePin, Target, TargetPin);
+    if (!bConnected)
+    {
+        const TArray<FString> SourceNames = ExpandPinAliases(SourcePin);
+        const TArray<FString> TargetNames = ExpandPinAliases(TargetPin);
+        for (const FString& S : SourceNames)
+        {
+            for (const FString& T : TargetNames)
             {
-                if (FUnrealMCPCommonUtils::ConnectGraphNodes(EventGraph, Source, Alias.Key, Target, Alias.Value))
+                if (FUnrealMCPCommonUtils::ConnectGraphNodes(EventGraph, Source, S, Target, T))
                 {
                     bConnected = true;
                     break;
                 }
             }
+            if (bConnected)
+            {
+                break;
+            }
         }
-        if (!bConnected)
+    }
+
+    // Last resort for cast "As*" output: first non-exec data output on source
+    if (!bConnected)
+    {
+        const FString LowerSrc = SourcePin.ToLower();
+        if (LowerSrc == TEXT("as") || LowerSrc == TEXT("result") || LowerSrc == TEXT("returnvalue") || LowerSrc == TEXT("castresult"))
         {
-            OutError = FString::Printf(TEXT("Failed to connect %s.%s -> %s.%s"), *SourceId, *SourcePin, *TargetId, *TargetPin);
-            return false;
+            for (UEdGraphPin* Pin : Source->Pins)
+            {
+                if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+                {
+                    if (FUnrealMCPCommonUtils::ConnectGraphNodes(EventGraph, Source, Pin->PinName.ToString(), Target, TargetPin))
+                    {
+                        bConnected = true;
+                        break;
+                    }
+                    for (const FString& T : ExpandPinAliases(TargetPin))
+                    {
+                        if (FUnrealMCPCommonUtils::ConnectGraphNodes(EventGraph, Source, Pin->PinName.ToString(), Target, T))
+                        {
+                            bConnected = true;
+                            break;
+                        }
+                    }
+                    if (bConnected)
+                    {
+                        break;
+                    }
+                }
+            }
         }
+    }
+
+    if (!bConnected)
+    {
+        OutError = FString::Printf(TEXT("Failed to connect %s.%s -> %s.%s"), *SourceId, *SourcePin, *TargetId, *TargetPin);
+        return false;
     }
     return true;
 }

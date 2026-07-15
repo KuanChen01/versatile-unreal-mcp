@@ -369,52 +369,100 @@ UEdGraphPin* FUnrealMCPCommonUtils::FindPin(UEdGraphNode* Node, const FString& P
     {
         return nullptr;
     }
-    
-    // Log all pins for debugging
-    UE_LOG(LogTemp, Display, TEXT("FindPin: Looking for pin '%s' (Direction: %d) in node '%s'"), 
-           *PinName, (int32)Direction, *Node->GetName());
-    
+
+    auto DirectionMatches = [Direction](const UEdGraphPin* Pin) -> bool
+    {
+        return Direction == EGPD_MAX || Pin->Direction == Direction;
+    };
+
+    // Exact PinName match
     for (UEdGraphPin* Pin : Node->Pins)
     {
-        UE_LOG(LogTemp, Display, TEXT("  - Available pin: '%s', Direction: %d, Category: %s"), 
-               *Pin->PinName.ToString(), (int32)Pin->Direction, *Pin->PinType.PinCategory.ToString());
-    }
-    
-    // First try exact match
-    for (UEdGraphPin* Pin : Node->Pins)
-    {
-        if (Pin->PinName.ToString() == PinName && (Direction == EGPD_MAX || Pin->Direction == Direction))
+        if (Pin && Pin->PinName.ToString() == PinName && DirectionMatches(Pin))
         {
-            UE_LOG(LogTemp, Display, TEXT("  - Found exact matching pin: '%s'"), *Pin->PinName.ToString());
             return Pin;
         }
     }
-    
-    // If no exact match and we're looking for a component reference, try case-insensitive match
+
+    // Case-insensitive PinName
     for (UEdGraphPin* Pin : Node->Pins)
     {
-        if (Pin->PinName.ToString().Equals(PinName, ESearchCase::IgnoreCase) && 
-            (Direction == EGPD_MAX || Pin->Direction == Direction))
+        if (Pin && Pin->PinName.ToString().Equals(PinName, ESearchCase::IgnoreCase) && DirectionMatches(Pin))
         {
-            UE_LOG(LogTemp, Display, TEXT("  - Found case-insensitive matching pin: '%s'"), *Pin->PinName.ToString());
             return Pin;
         }
     }
-    
-    // If we're looking for a component output and didn't find it by name, try to find the first data output pin
-    if (Direction == EGPD_Output && Cast<UK2Node_VariableGet>(Node) != nullptr)
+
+    // Friendly display name (e.g. "True" vs pin name "then")
+    for (UEdGraphPin* Pin : Node->Pins)
+    {
+        if (!Pin || !DirectionMatches(Pin))
+        {
+            continue;
+        }
+        const FString Friendly = Pin->PinFriendlyName.IsEmpty()
+            ? FString()
+            : Pin->PinFriendlyName.ToString();
+        if (!Friendly.IsEmpty() && Friendly.Equals(PinName, ESearchCase::IgnoreCase))
+        {
+            return Pin;
+        }
+    }
+
+    // Common agent-facing aliases → engine pin names
+    const FString Lower = PinName.ToLower();
+    TArray<FString> AliasCandidates;
+    if (Lower == TEXT("true") || Lower == TEXT("then0"))
+    {
+        AliasCandidates = {TEXT("then"), TEXT("True")};
+    }
+    else if (Lower == TEXT("false") || Lower == TEXT("then1") || Lower == TEXT("fail") || Lower == TEXT("failed"))
+    {
+        AliasCandidates = {TEXT("else"), TEXT("False"), TEXT("CastFailed")};
+    }
+    else if (Lower == TEXT("exec") || Lower == TEXT("in") || Lower == TEXT("execin"))
+    {
+        AliasCandidates = {TEXT("execute"), TEXT("Execute")};
+    }
+    else if (Lower == TEXT("cond") || Lower == TEXT("bool"))
+    {
+        AliasCandidates = {TEXT("Condition")};
+    }
+    else if (Lower == TEXT("object") || Lower == TEXT("target") || Lower == TEXT("castobject"))
+    {
+        AliasCandidates = {TEXT("Object"), TEXT("self")};
+    }
+    else if (Lower == TEXT("playfromstart"))
+    {
+        AliasCandidates = {TEXT("PlayFromStart"), TEXT("Play")};
+    }
+
+    for (const FString& Alias : AliasCandidates)
     {
         for (UEdGraphPin* Pin : Node->Pins)
         {
-            if (Pin->Direction == EGPD_Output && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+            if (Pin && DirectionMatches(Pin) &&
+                (Pin->PinName.ToString().Equals(Alias, ESearchCase::IgnoreCase) ||
+                 (!Pin->PinFriendlyName.IsEmpty() && Pin->PinFriendlyName.ToString().Equals(Alias, ESearchCase::IgnoreCase))))
             {
-                UE_LOG(LogTemp, Display, TEXT("  - Found fallback data output pin: '%s'"), *Pin->PinName.ToString());
                 return Pin;
             }
         }
     }
-    
-    UE_LOG(LogTemp, Warning, TEXT("  - No matching pin found for '%s'"), *PinName);
+
+    // Variable get: first data output
+    if (Direction == EGPD_Output && Cast<UK2Node_VariableGet>(Node) != nullptr)
+    {
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+            {
+                return Pin;
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("FindPin: no match for '%s' on node '%s'"), *PinName, *Node->GetName());
     return nullptr;
 }
 
