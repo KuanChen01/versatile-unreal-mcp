@@ -225,8 +225,28 @@ void FMCPServerRunnable::ProcessJsonPayload(FSocket* Socket, const TArray<uint8>
 		}
 	}
 
-	const FString Response = Bridge->ExecuteCommand(CommandType, Params);
-	UE_LOG(LogUnrealMCPServer, Display, TEXT("MCPServerRunnable: Sending response for %s (%d chars)"), *CommandType, Response.Len());
+	FString RequestId;
+	JsonObject->TryGetStringField(TEXT("request_id"), RequestId);
+	if (RequestId.IsEmpty() && Params.IsValid())
+	{
+		// Optional fallback if a client nested the id
+		Params->TryGetStringField(TEXT("request_id"), RequestId);
+	}
+
+	if (!RequestId.IsEmpty())
+	{
+		UE_LOG(LogUnrealMCPServer, Display, TEXT("MCPServerRunnable: command=%s request_id=%s"), *CommandType, *RequestId);
+	}
+
+	const FString Response = Bridge->ExecuteCommand(CommandType, Params, RequestId);
+	if (RequestId.IsEmpty())
+	{
+		UE_LOG(LogUnrealMCPServer, Display, TEXT("MCPServerRunnable: Sending response for %s (%d chars)"), *CommandType, Response.Len());
+	}
+	else
+	{
+		UE_LOG(LogUnrealMCPServer, Display, TEXT("MCPServerRunnable: Sending response for %s request_id=%s (%d chars)"), *CommandType, *RequestId, Response.Len());
+	}
 
 	FTCHARToUTF8 ResponseUtf8(*Response);
 	TArray<uint8> ResponseBytes;

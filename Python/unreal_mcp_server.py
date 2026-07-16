@@ -102,6 +102,7 @@ class UnrealConnection:
         params: Optional[Dict[str, Any]] = None,
         *,
         timeout: Optional[float] = None,
+        request_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Send a command to Unreal Engine and return the parsed JSON response.
@@ -114,17 +115,22 @@ class UnrealConnection:
 
         command_timeout = timeout if timeout is not None else timeout_for_command(command)
         if not self.connect(timeout=min(CONNECT_TIMEOUT, command_timeout)):
-            logger.error("Failed to connect to Unreal Engine for command %s", command)
+            logger.error(
+                "Failed to connect to Unreal Engine for command %s request_id=%s",
+                command,
+                request_id,
+            )
             return None
 
         assert self.socket is not None
         try:
             self.socket.settimeout(command_timeout)
 
-            request = build_command(command, params)
+            request = build_command(command, params, request_id=request_id)
             logger.info(
-                "Sending command type=%s timeout=%.1fs protocol=%s",
+                "Sending command type=%s request_id=%s timeout=%.1fs protocol=%s",
                 command,
+                request_id,
                 command_timeout,
                 PROTOCOL_VERSION,
             )
@@ -132,7 +138,11 @@ class UnrealConnection:
             send_json_frame(self.socket, request)
 
             response = recv_json_frame(self.socket)
-            logger.info("Complete response from Unreal for %s", command)
+            logger.info(
+                "Complete response from Unreal for %s request_id=%s",
+                command,
+                request_id or (response.get("request_id") if isinstance(response, dict) else None),
+            )
             logger.debug("Response payload: %s", response)
 
             if response.get("status") == "error":
@@ -377,8 +387,13 @@ def info():
     - `unreal://play/state` — PIE/SIE state
     - `unreal://actors/list` — actors in the current level
     - `unreal://preflight` — composite readiness snapshot
+    - `unreal://metrics/recent` — recent bridge command metrics (request_id, durations)
     - `unreal://assets/find/{{query}}` — asset search under /Game (use `_` for broad sample)
     - `unreal://asset/info/{{package_path}}` — one asset; encode path with dashes (Game-Foo-Bar → /Game/Foo/Bar)
+
+    ## Correlation
+    - Every tool response includes ``meta.request_id`` and ``meta.client_duration_ms``.
+    - When the plugin supports it, ``meta.plugin_duration_ms`` and the wire ``request_id`` echo match.
 
     ## Agent policy (read first)
     1. Read `unreal://preflight` or call `editor_preflight` / `get_bridge_status` before mutating.

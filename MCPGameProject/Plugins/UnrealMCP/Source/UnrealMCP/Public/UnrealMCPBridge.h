@@ -44,8 +44,8 @@ public:
 	uint16 GetPort() const { return Port; }
 	FString GetListenHost() const { return ServerAddress.ToString(); }
 
-	// Command execution
-	FString ExecuteCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params);
+	// Command execution (optional RequestId is echoed on the wire response for log correlation)
+	FString ExecuteCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params, const FString& RequestId = TEXT(""));
 
 private:
 	// Server state

@@ -236,6 +236,24 @@ def register_mcp_resources(mcp: FastMCP) -> None:
         )
 
     @mcp.resource(
+        "unreal://metrics/recent",
+        name="Bridge Metrics",
+        description="Recent bridge command metrics (request_id, duration, success) from this Python process.",
+        mime_type="application/json",
+    )
+    def resource_metrics_recent() -> str:
+        from bridge_metrics import get_metrics_summary, get_recent_metrics
+
+        return _json(
+            {
+                "success": True,
+                "resource": "unreal://metrics/recent",
+                "summary": get_metrics_summary(),
+                "recent": get_recent_metrics(30),
+            }
+        )
+
+    @mcp.resource(
         "unreal://asset/info/{package_path}",
         name="Asset Info",
         description=(

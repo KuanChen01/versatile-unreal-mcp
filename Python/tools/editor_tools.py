@@ -36,6 +36,24 @@ def register_editor_tools(mcp: FastMCP):
         return normalized
 
     @mcp.tool()
+    def get_bridge_metrics(ctx: Context, limit: int = 20) -> Dict[str, Any]:
+        """
+        Return recent bridge command metrics from this Python process.
+
+        Includes request_id, command name, success, client_duration_ms, and optional
+        plugin_duration_ms when the editor echoes timing.
+        """
+        from bridge_metrics import get_metrics_summary, get_recent_metrics
+
+        limit = max(1, min(int(limit), 100))
+        return {
+            "success": True,
+            "message": f"Last {limit} bridge command samples",
+            "summary": get_metrics_summary(),
+            "recent": get_recent_metrics(limit),
+        }
+
+    @mcp.tool()
     def get_viewport_status(ctx: Context) -> Dict[str, Any]:
         """Report active viewport availability, size, and self-check readiness."""
         return run_bridge_command("get_viewport_status")

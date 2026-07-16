@@ -11,9 +11,40 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from bridge_metrics import new_request_id, record_command_metric
 from bridge_protocol import PROTOCOL_VERSION
 
 logger = logging.getLogger("UnrealMCP")
+
+
+def _enrich_meta(
+    meta: Dict[str, Any],
+    response: Optional[Dict[str, Any]],
+    *,
+    request_id: Optional[str],
+    duration_ms: Optional[float],
+) -> Dict[str, Any]:
+    """Attach request_id and timing fields to meta."""
+    if request_id:
+        meta["request_id"] = request_id
+    if duration_ms is not None:
+        # client_duration_ms is authoritative; duration_ms kept for backward compatibility
+        rounded = round(duration_ms, 2)
+        meta["duration_ms"] = rounded
+        meta["client_duration_ms"] = rounded
+    if isinstance(response, dict):
+        rid = response.get("request_id")
+        if isinstance(rid, str) and rid and "request_id" not in meta:
+            meta["request_id"] = rid
+        plugin_ms = response.get("duration_ms")
+        if plugin_ms is None and isinstance(response.get("result"), dict):
+            plugin_ms = response["result"].get("duration_ms")
+        if plugin_ms is not None:
+            try:
+                meta["plugin_duration_ms"] = round(float(plugin_ms), 2)
+            except (TypeError, ValueError):
+                pass
+    return meta
 
 
 def normalize_response(
@@ -21,6 +52,7 @@ def normalize_response(
     *,
     command_name: str,
     duration_ms: Optional[float] = None,
+    request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Normalize a raw bridge response into a stable tool envelope.
@@ -31,7 +63,7 @@ def normalize_response(
           "success": True,
           "message": optional,
           ...result fields...,
-          "meta": {"command", "protocol_version", "duration_ms"}
+          "meta": {"command", "protocol_version", "request_id", "duration_ms", ...}
         }
 
     Failure shape::
@@ -47,11 +79,14 @@ def normalize_response(
         "command": command_name,
         "protocol_version": PROTOCOL_VERSION,
     }
-    if duration_ms is not None:
-        meta["duration_ms"] = round(duration_ms, 2)
+    meta = _enrich_meta(meta, response, request_id=request_id, duration_ms=duration_ms)
 
     if not response:
-        logger.error("No response from Unreal Engine for %s", command_name)
+        logger.error(
+            "No response from Unreal Engine for %s request_id=%s",
+            command_name,
+            request_id,
+        )
         return {
             "success": False,
             "message": "No response from Unreal Engine",
@@ -98,7 +133,7 @@ def normalize_response(
         normalized = {
             k: v
             for k, v in response.items()
-            if k not in ("status", "result")
+            if k not in ("status", "result", "request_id", "duration_ms")
         }
 
     normalized.setdefault("success", True)
@@ -137,7 +172,11 @@ def rewrite_unknown_command_message(
     return normalized
 
 
-def connection_failure(command_name: str = "") -> Dict[str, Any]:
+def connection_failure(
+    command_name: str = "",
+    *,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Standard failure when the editor bridge is unreachable or handshake fails."""
     from unreal_mcp_server import get_last_connect_error
 
@@ -148,6 +187,8 @@ def connection_failure(command_name: str = "") -> Dict[str, Any]:
     }
     if command_name:
         meta["command"] = command_name
+    if request_id:
+        meta["request_id"] = request_id
 
     # Version / framing mismatches get a dedicated code for agents.
     lower = detail.lower()
@@ -167,22 +208,53 @@ def connection_failure(command_name: str = "") -> Dict[str, Any]:
 def run_bridge_command(
     command_name: str,
     params: Optional[Dict[str, Any]] = None,
+    *,
+    request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Connect (via shared helper), send one command, return a normalized envelope.
+
+    Always attaches ``meta.request_id`` and records a metrics sample.
     """
     from unreal_mcp_server import clear_unreal_connection_cache, get_unreal_connection
 
+    rid = request_id or new_request_id()
+
     unreal = get_unreal_connection()
     if not unreal:
-        logger.error("Failed to connect to Unreal Engine for %s", command_name)
-        return connection_failure(command_name)
+        logger.error(
+            "Failed to connect to Unreal Engine for %s request_id=%s",
+            command_name,
+            rid,
+        )
+        out = connection_failure(command_name, request_id=rid)
+        record_command_metric(
+            request_id=rid,
+            command=command_name,
+            success=False,
+            error_code=(out.get("meta") or {}).get("error_code"),
+            message=out.get("message"),
+        )
+        return out
 
     started = time.perf_counter()
     try:
-        response = unreal.send_command(command_name, params or {})
+        response = unreal.send_command(command_name, params or {}, request_id=rid)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Exception running bridge command %s: %s", command_name, exc)
+        logger.error(
+            "Exception running bridge command %s request_id=%s: %s",
+            command_name,
+            rid,
+            exc,
+        )
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        record_command_metric(
+            request_id=rid,
+            command=command_name,
+            success=False,
+            client_duration_ms=duration_ms,
+            message=str(exc),
+        )
         return {
             "success": False,
             "message": str(exc),
@@ -190,6 +262,9 @@ def run_bridge_command(
             "meta": {
                 "command": command_name,
                 "protocol_version": PROTOCOL_VERSION,
+                "request_id": rid,
+                "duration_ms": round(duration_ms, 2),
+                "client_duration_ms": round(duration_ms, 2),
             },
         }
 
@@ -199,11 +274,23 @@ def run_bridge_command(
         clear_unreal_connection_cache()
 
     duration_ms = (time.perf_counter() - started) * 1000.0
-    return normalize_response(
+    normalized = normalize_response(
         response,
         command_name=command_name,
         duration_ms=duration_ms,
+        request_id=rid,
     )
+    meta = normalized.get("meta") or {}
+    record_command_metric(
+        request_id=str(meta.get("request_id") or rid),
+        command=command_name,
+        success=bool(normalized.get("success")),
+        client_duration_ms=meta.get("client_duration_ms") or duration_ms,
+        plugin_duration_ms=meta.get("plugin_duration_ms"),
+        error_code=normalized.get("error_code") or meta.get("error_code"),
+        message=None if normalized.get("success") else str(normalized.get("message") or ""),
+    )
+    return normalized
 
 
 def extract_list_field(

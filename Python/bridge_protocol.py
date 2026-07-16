@@ -4,8 +4,8 @@ UnrealMCP bridge wire protocol (Python side).
 Protocol 2.0 frame format:
   [uint32 little-endian payload length][UTF-8 JSON body]
 
-JSON request body (unchanged):
-  {"type": "<command>", "params": {...}}
+JSON request body:
+  {"type": "<command>", "params": {...}, "request_id": "<optional correlation id>"}
 
 This module is intentionally free of MCP / socket connection policy so it can
 be unit-tested offline.
@@ -270,6 +270,14 @@ def send_json_frame(sock: Any, obj: Mapping[str, Any]) -> None:
     sock.sendall(frame)
 
 
-def build_command(command: str, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    """Build a bridge request object."""
-    return {"type": command, "params": dict(params or {})}
+def build_command(
+    command: str,
+    params: Optional[Mapping[str, Any]] = None,
+    *,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a bridge request object (optional request_id for log correlation)."""
+    body: Dict[str, Any] = {"type": command, "params": dict(params or {})}
+    if request_id:
+        body["request_id"] = str(request_id)
+    return body

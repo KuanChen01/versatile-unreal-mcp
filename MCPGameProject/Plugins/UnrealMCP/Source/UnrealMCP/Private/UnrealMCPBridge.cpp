@@ -429,18 +429,41 @@ void UUnrealMCPBridge::StopServer()
 }
 
 // Execute a command received from a client
-FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
+FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params, const FString& RequestId)
 {
-    UE_LOG(LogTemp, Display, TEXT("UnrealMCPBridge: Executing command: %s"), *CommandType);
+    if (RequestId.IsEmpty())
+    {
+        UE_LOG(LogTemp, Display, TEXT("UnrealMCPBridge: Executing command: %s"), *CommandType);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Display, TEXT("UnrealMCPBridge: Executing command: %s request_id=%s"), *CommandType, *RequestId);
+    }
     
     // Create a promise to wait for the result
     TPromise<FString> Promise;
     TFuture<FString> Future = Promise.GetFuture();
     
     // Queue execution on Game Thread
-    AsyncTask(ENamedThreads::GameThread, [this, CommandType, Params, Promise = MoveTemp(Promise)]() mutable
+    AsyncTask(ENamedThreads::GameThread, [this, CommandType, Params, RequestId, Promise = MoveTemp(Promise)]() mutable
     {
         TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject);
+        const double StartSeconds = FPlatformTime::Seconds();
+
+        auto FinalizeResponse = [&]()
+        {
+            if (!RequestId.IsEmpty())
+            {
+                ResponseJson->SetStringField(TEXT("request_id"), RequestId);
+            }
+            const double DurationMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
+            ResponseJson->SetNumberField(TEXT("duration_ms"), DurationMs);
+
+            FString ResultString;
+            TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ResultString);
+            FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), Writer);
+            Promise.SetValue(ResultString);
+        };
         
         try
         {
@@ -490,11 +513,7 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             {
                 ResponseJson->SetStringField(TEXT("status"), TEXT("error"));
                 ResponseJson->SetStringField(TEXT("error"), FString::Printf(TEXT("Unknown command: %s"), *CommandType));
-                
-                FString ResultString;
-                TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ResultString);
-                FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), Writer);
-                Promise.SetValue(ResultString);
+                FinalizeResponse();
                 return;
             }
             
@@ -530,10 +549,7 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             ResponseJson->SetStringField(TEXT("error"), UTF8_TO_TCHAR(e.what()));
         }
         
-        FString ResultString;
-        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ResultString);
-        FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), Writer);
-        Promise.SetValue(ResultString);
+        FinalizeResponse();
     });
     
     return Future.Get();
