@@ -70,6 +70,10 @@ namespace
     // Must match Python bridge_protocol.PROTOCOL_VERSION (length-prefixed frames).
     const FString UnrealMCPProtocolVersion = TEXT("2.0");
 
+    // Bump when command handlers change in a way agents must detect after hot-reload/copy drift.
+    // Surfaced on get_bridge_status as plugin.handler_build.
+    const FString UnrealMCPHandlerBuild = TEXT("2026-07-25.4");
+
     const TArray<FString>& GetEditorCommandTypes()
     {
         static const TArray<FString> CommandTypes = {
@@ -208,14 +212,35 @@ namespace
         return CommandsObject;
     }
 
+    int32 CountCommandGroupSize(const TArray<FString>& CommandTypes)
+    {
+        return CommandTypes.Num();
+    }
+
     TSharedPtr<FJsonObject> BuildBridgeStatusObject()
     {
         TSharedPtr<FJsonObject> ResultObject = MakeShared<FJsonObject>();
         ResultObject->SetBoolField(TEXT("success"), true);
         ResultObject->SetStringField(TEXT("protocol_version"), UnrealMCPProtocolVersion);
 
+        const TArray<FString>& EditorCmds = GetEditorCommandTypes();
+        const TArray<FString>& BlueprintCmds = GetBlueprintCommandTypes();
+        const TArray<FString>& BlueprintNodeCmds = GetBlueprintNodeCommandTypes();
+        const TArray<FString>& MaterialCmds = GetMaterialCommandTypes();
+        const TArray<FString>& ProjectCmds = GetProjectCommandTypes();
+        const TArray<FString>& UMGCmds = GetUMGCommandTypes();
+        const int32 CommandCount =
+            CountCommandGroupSize(EditorCmds) +
+            CountCommandGroupSize(BlueprintCmds) +
+            CountCommandGroupSize(BlueprintNodeCmds) +
+            CountCommandGroupSize(MaterialCmds) +
+            CountCommandGroupSize(ProjectCmds) +
+            CountCommandGroupSize(UMGCmds);
+
         TSharedPtr<FJsonObject> PluginObject = MakeShared<FJsonObject>();
         PluginObject->SetStringField(TEXT("name"), TEXT("UnrealMCP"));
+        PluginObject->SetStringField(TEXT("handler_build"), UnrealMCPHandlerBuild);
+        PluginObject->SetNumberField(TEXT("command_count"), CommandCount);
 
         const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UnrealMCP"));
         if (Plugin.IsValid())
@@ -228,6 +253,12 @@ namespace
             PluginObject->SetNumberField(TEXT("version"), 0);
             PluginObject->SetStringField(TEXT("version_name"), TEXT(""));
         }
+
+        TSharedPtr<FJsonObject> FeaturesObject = MakeShared<FJsonObject>();
+        FeaturesObject->SetBoolField(TEXT("replace_existing_spawn"), true);
+        FeaturesObject->SetBoolField(TEXT("editor_destroy_on_delete"), true);
+        FeaturesObject->SetBoolField(TEXT("request_id_echo"), true);
+        PluginObject->SetObjectField(TEXT("features"), FeaturesObject);
         ResultObject->SetObjectField(TEXT("plugin"), PluginObject);
 
         TSharedPtr<FJsonObject> EditorObject = MakeShared<FJsonObject>();
@@ -535,6 +566,15 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                 // Set success status and include the result
                 ResponseJson->SetStringField(TEXT("status"), TEXT("success"));
                 ResponseJson->SetObjectField(TEXT("result"), ResultJson);
+            }
+            else if (ResultJson.IsValid())
+            {
+                // Keep structured error fields (error_code, recovery_hint, …) for the Python envelope.
+                ResponseJson->SetStringField(TEXT("status"), TEXT("error"));
+                ResponseJson->SetStringField(TEXT("error"), ErrorMessage);
+                ResponseJson->SetObjectField(TEXT("result"), ResultJson);
+                FinalizeResponse();
+                return;
             }
             else
             {

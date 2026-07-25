@@ -11,7 +11,7 @@ MIME type for all current resources: `application/json`.
 | URI | Editor required | Contents |
 | --- | --- | --- |
 | `unreal://protocol` | No | Protocol 2.0 contract, default host/port, env overrides |
-| `unreal://bridge/status` | Yes | Live plugin, protocol, listen, command groups |
+| `unreal://bridge/status` | Yes | Live plugin (`handler_build`, `command_count`, `features`), protocol, listen, command groups; flags `handler_build_mismatch` vs Python expected stamp |
 | `unreal://level/status` | Yes | Map package, dirty, actor count |
 | `unreal://viewport/status` | Yes | Active viewport readiness |
 | `unreal://play/state` | Yes | PIE/SIE state |

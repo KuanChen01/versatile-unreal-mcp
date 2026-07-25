@@ -69,11 +69,29 @@ def register_mcp_resources(mcp: FastMCP) -> None:
     def resource_bridge_status() -> str:
         from unreal_mcp_server import SERVER_NAME, SERVER_VERSION
 
+        EXPECTED_HANDLER_BUILD = "2026-07-25.4"
         response = run_bridge_command("get_bridge_status")
-        if not response.get("success", False):
-            return _json(_bridge_error_payload("unreal://bridge/status", response))
-        response["server"] = {"name": SERVER_NAME, "version": SERVER_VERSION}
+        response["server"] = {
+            "name": SERVER_NAME,
+            "version": SERVER_VERSION,
+            "expected_handler_build": EXPECTED_HANDLER_BUILD,
+        }
         response["resource"] = "unreal://bridge/status"
+        if not response.get("success", False):
+            payload = _bridge_error_payload("unreal://bridge/status", response)
+            payload["server"] = response["server"]
+            return _json(payload)
+
+        plugin = response.get("plugin") or {}
+        live_build = plugin.get("handler_build")
+        response["handler_build_mismatch"] = (
+            (not live_build) or (live_build != EXPECTED_HANDLER_BUILD)
+        )
+        if response["handler_build_mismatch"]:
+            response["recovery_hint"] = (
+                f"Live handler_build={live_build!r}, expected={EXPECTED_HANDLER_BUILD!r}. "
+                "Sync/rebuild UnrealMCP and fully restart Editor."
+            )
         return _json(response)
 
     @mcp.resource(

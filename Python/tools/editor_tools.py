@@ -22,17 +22,52 @@ def register_editor_tools(mcp: FastMCP):
 
     @mcp.tool()
     def get_bridge_status(ctx: Context) -> Dict[str, Any]:
-        """Report the live Unreal bridge status and routed command groups."""
+        """
+        Report the live Unreal bridge status and routed command groups.
+
+        When connected, inspect plugin.handler_build / plugin.command_count /
+        plugin.features to detect stale hot-reload or copy-install drift.
+        When disconnected, returns success=false with recovery_hint (Editor offline).
+        """
         from unreal_mcp_server import SERVER_NAME, SERVER_VERSION
 
-        normalized = run_bridge_command("get_bridge_status")
-        if not normalized.get("success", False):
-            return normalized
+        # Expected stamp after this repo's Python + plugin co-upgrade (bump with C++ UnrealMCPHandlerBuild).
+        EXPECTED_HANDLER_BUILD = "2026-07-25.4"
 
+        normalized = run_bridge_command("get_bridge_status")
         normalized["server"] = {
             "name": SERVER_NAME,
             "version": SERVER_VERSION,
+            "expected_handler_build": EXPECTED_HANDLER_BUILD,
         }
+
+        if not normalized.get("success", False):
+            normalized.setdefault(
+                "recovery_hint",
+                "Open UnrealMCP_ZipSmoke_57 (or agreed test project) with UnrealMCP enabled on "
+                "127.0.0.1:55557 (or UNREAL_MCP_HOST/PORT). Protocol 2.0 required.",
+            )
+            normalized.setdefault("editor_online", False)
+            return normalized
+
+        normalized["editor_online"] = True
+        plugin = normalized.get("plugin") or {}
+        live_build = plugin.get("handler_build")
+        if live_build and live_build != EXPECTED_HANDLER_BUILD:
+            normalized["handler_build_mismatch"] = True
+            normalized["recovery_hint"] = (
+                f"Live plugin.handler_build={live_build!r} != expected {EXPECTED_HANDLER_BUILD!r}. "
+                "Sync plugin source/release, rebuild, and fully restart the Editor "
+                "(hot-reload often does not refresh handlers)."
+            )
+        elif not live_build:
+            normalized["handler_build_mismatch"] = True
+            normalized["recovery_hint"] = (
+                "Plugin did not report handler_build (older binary). "
+                "Upgrade UnrealMCP plugin to 1.1+ / handler_build 2026-07-25.4 and full restart Editor."
+            )
+        else:
+            normalized["handler_build_mismatch"] = False
         return normalized
 
     @mcp.tool()
@@ -220,6 +255,7 @@ def register_editor_tools(mcp: FastMCP):
         location: List[float] = [0.0, 0.0, 0.0],
         rotation: List[float] = [0.0, 0.0, 0.0],
         scale: List[float] = [1.0, 1.0, 1.0],
+        replace_existing: bool = False,
     ) -> Dict[str, Any]:
         """
         Spawn an actor from any Actor class or Blueprint.
@@ -229,12 +265,15 @@ def register_editor_tools(mcp: FastMCP):
                 or short alias (PointLight, StaticMeshActor, CameraActor)
             name: Optional unique actor name
             location / rotation / scale: Transform
+            replace_existing: If true and name is taken, EditorDestroyActor then respawn
+                (requires plugin handler_build >= 2026-07-25.4)
         """
         params: Dict[str, Any] = {
             "class_path": class_path,
             "location": location or [0.0, 0.0, 0.0],
             "rotation": rotation or [0.0, 0.0, 0.0],
             "scale": scale or [1.0, 1.0, 1.0],
+            "replace_existing": bool(replace_existing),
         }
         if name:
             params["name"] = name
@@ -281,7 +320,12 @@ def register_editor_tools(mcp: FastMCP):
 
     @mcp.tool()
     def delete_actor(ctx: Context, name: str) -> Dict[str, Any]:
-        """DESTRUCTIVE: permanently delete a level actor by name."""
+        """
+        DESTRUCTIVE: permanently delete a level actor by name.
+
+        Uses EditorDestroyActor so the object name can be reused on a later spawn.
+        Prefer spawn_actor_by_class(..., replace_existing=true) for delete+respawn.
+        """
         return run_bridge_command("delete_actor", {"name": name})
 
     @mcp.tool()
@@ -402,13 +446,20 @@ def register_editor_tools(mcp: FastMCP):
         actor_name: str,
         location: List[float] = [0.0, 0.0, 0.0],
         rotation: List[float] = [0.0, 0.0, 0.0],
+        replace_existing: bool = False,
     ) -> Dict[str, Any]:
-        """Spawn an actor from a Blueprint."""
+        """
+        Spawn an actor from a Blueprint.
+
+        DESTRUCTIVE when replace_existing=true (destroys an existing actor of the same name first).
+        Never reuse a live actor name without replace_existing or delete_actor first.
+        """
         params = {
             "blueprint_name": blueprint_name,
             "actor_name": actor_name,
             "location": location or [0.0, 0.0, 0.0],
             "rotation": rotation or [0.0, 0.0, 0.0],
+            "replace_existing": bool(replace_existing),
         }
         for param_name in ("location", "rotation"):
             param_value = params[param_name]

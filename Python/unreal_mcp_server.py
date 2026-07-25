@@ -37,7 +37,7 @@ logger = logging.getLogger("UnrealMCP")
 
 # Configuration
 SERVER_NAME = "UnrealMCP Python Server"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 
 # Multi-instance: set UNREAL_MCP_HOST / UNREAL_MCP_PORT to match the Editor process env.
 import os as _os

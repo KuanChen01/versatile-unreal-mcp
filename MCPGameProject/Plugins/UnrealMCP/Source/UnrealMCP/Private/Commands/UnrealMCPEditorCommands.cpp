@@ -37,6 +37,48 @@
 #include "MessageLogModule.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/UObjectGlobals.h"
+#include "Misc/Guid.h"
+
+namespace
+{
+	/**
+	 * Free an actor's UObject name then EditorDestroy it.
+	 * IMPORTANT: never Rename into GetTransientPackage() — that leaves the actor without a
+	 * valid World and EditorDestroyActor can Fatal (ACCESS_VIOLATION). Keep the same outer.
+	 */
+	bool FreeActorNameAndDestroy(UWorld* World, AActor* Actor, FString& OutError)
+	{
+		if (!World || !IsValid(Actor) || Actor->IsActorBeingDestroyed())
+		{
+			OutError = TEXT("Invalid world or actor");
+			return false;
+		}
+
+		const FString OriginalName = Actor->GetName();
+		const FString TempName = FString::Printf(
+			TEXT("%s_MCPFree_%s"),
+			*OriginalName,
+			*FGuid::NewGuid().ToString(EGuidFormats::Digits));
+
+		// Rename in-place (Outer=nullptr keeps current outer / level package).
+		const bool bRenamed = Actor->Rename(
+			*TempName,
+			nullptr,
+			REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders | REN_NonTransactional);
+		if (!bRenamed)
+		{
+			OutError = FString::Printf(TEXT("Failed to rename actor '%s' to free its name"), *OriginalName);
+			return false;
+		}
+
+		if (!World->EditorDestroyActor(Actor, true))
+		{
+			OutError = FString::Printf(TEXT("EditorDestroyActor failed for '%s' (was '%s')"), *TempName, *OriginalName);
+			return false;
+		}
+		return true;
+	}
+}
 
 namespace
 {
@@ -987,23 +1029,30 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteActor(const TShare
             // Store actor info before deletion for the response
             TSharedPtr<FJsonObject> ActorInfo = FUnrealMCPCommonUtils::ActorToJsonObject(Actor);
 
-            // Editor destroy frees the object name so a later spawn can reuse it.
-            // Plain Destroy() leaves the name reserved until GC and can crash spawn with Required_Fatal.
-            const bool bDestroyed = World->EditorDestroyActor(Actor, true);
-            if (!bDestroyed)
+            FString FreeError;
+            if (!FreeActorNameAndDestroy(World, Actor, FreeError))
             {
-                return FUnrealMCPCommonUtils::CreateErrorResponse(
-                    FString::Printf(TEXT("Failed to destroy actor: %s"), *ActorName));
+                return FUnrealMCPCommonUtils::CreateErrorResponse(FreeError);
             }
             
             TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
             ResultObj->SetObjectField(TEXT("deleted_actor"), ActorInfo);
             ResultObj->SetBoolField(TEXT("success"), true);
+            ResultObj->SetBoolField(TEXT("name_freed"), true);
+            ResultObj->SetStringField(
+                TEXT("recovery_hint"),
+                TEXT("Name freed via in-place rename + EditorDestroyActor. Prefer replace_existing=true on next spawn, or a unique name."));
             return ResultObj;
         }
     }
     
-    return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName));
+    TSharedPtr<FJsonObject> NotFound = FUnrealMCPCommonUtils::CreateErrorResponse(
+        FString::Printf(TEXT("Actor not found: %s"), *ActorName));
+    NotFound->SetStringField(TEXT("error_code"), TEXT("actor_not_found"));
+    NotFound->SetStringField(
+        TEXT("recovery_hint"),
+        TEXT("Actor is already absent; safe to spawn with this name (or use replace_existing=true)."));
+    return NotFound;
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorTransform(const TSharedPtr<FJsonObject>& Params)
@@ -1251,16 +1300,42 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActorByClass(const 
             FString::Printf(TEXT("Class '%s' is not an Actor"), *ActorClass->GetPathName()));
     }
 
+    bool bReplaceExisting = false;
+    if (Params->HasField(TEXT("replace_existing")))
+    {
+        bReplaceExisting = Params->GetBoolField(TEXT("replace_existing"));
+    }
+
+    bool bReplacedExisting = false;
     if (!ActorName.IsEmpty())
     {
         TArray<AActor*> AllActors;
         UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
         for (AActor* Existing : AllActors)
         {
-            if (Existing && Existing->GetName() == ActorName)
+            if (Existing && !Existing->IsActorBeingDestroyed() && Existing->GetName() == ActorName)
             {
-                return FUnrealMCPCommonUtils::CreateErrorResponse(
-                    FString::Printf(TEXT("Actor with name '%s' already exists"), *ActorName));
+                if (!bReplaceExisting)
+                {
+                    TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
+                        FString::Printf(
+                            TEXT("Actor with name '%s' already exists. Delete it first, pass replace_existing=true, or choose a unique name."),
+                            *ActorName));
+                    Err->SetStringField(TEXT("error_code"), TEXT("actor_name_in_use"));
+                    Err->SetStringField(
+                        TEXT("recovery_hint"),
+                        TEXT("Call delete_actor then spawn, or spawn_actor_by_class(..., replace_existing=true)."));
+                    return Err;
+                }
+
+                FString FreeError;
+                if (!FreeActorNameAndDestroy(World, Existing, FreeError))
+                {
+                    return FUnrealMCPCommonUtils::CreateErrorResponse(
+                        FString::Printf(TEXT("replace_existing: %s"), *FreeError));
+                }
+                bReplacedExisting = true;
+                break;
             }
         }
     }
@@ -1293,10 +1368,15 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActorByClass(const 
     AActor* NewActor = World->SpawnActor<AActor>(ActorClass, Location, Rotation, SpawnParams);
     if (!NewActor)
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(
+        TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
             ActorName.IsEmpty()
                 ? TEXT("Failed to spawn actor")
                 : FString::Printf(TEXT("Failed to spawn actor (name '%s' may already be in use)"), *ActorName));
+        Err->SetStringField(TEXT("error_code"), TEXT("spawn_failed"));
+        Err->SetStringField(
+            TEXT("recovery_hint"),
+            TEXT("If the name was just deleted, retry once or use a unique name. Prefer replace_existing=true for respawns."));
+        return Err;
     }
 
     NewActor->SetActorScale3D(Scale);
@@ -1308,6 +1388,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActorByClass(const 
     TSharedPtr<FJsonObject> ResultObj = FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
     ResultObj->SetBoolField(TEXT("success"), true);
     ResultObj->SetStringField(TEXT("class_path"), ActorClass->GetPathName());
+    ResultObj->SetBoolField(TEXT("replaced_existing"), bReplacedExisting);
     return ResultObj;
 }
 
@@ -1510,7 +1591,14 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
     }
 
+    bool bReplaceExisting = false;
+    if (Params->HasField(TEXT("replace_existing")))
+    {
+        bReplaceExisting = Params->GetBoolField(TEXT("replace_existing"));
+    }
+
     // Guard name collisions up front (delete+respawn races used to hit a fatal check in LevelActor.cpp).
+    bool bReplacedExisting = false;
     {
         TArray<AActor*> AllActors;
         UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
@@ -1518,10 +1606,27 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
         {
             if (Existing && !Existing->IsActorBeingDestroyed() && Existing->GetName() == ActorName)
             {
-                return FUnrealMCPCommonUtils::CreateErrorResponse(
-                    FString::Printf(
-                        TEXT("Actor with name '%s' already exists. Delete it first or choose a unique actor_name."),
-                        *ActorName));
+                if (!bReplaceExisting)
+                {
+                    TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
+                        FString::Printf(
+                            TEXT("Actor with name '%s' already exists. Delete it first, pass replace_existing=true, or choose a unique actor_name."),
+                            *ActorName));
+                    Err->SetStringField(TEXT("error_code"), TEXT("actor_name_in_use"));
+                    Err->SetStringField(
+                        TEXT("recovery_hint"),
+                        TEXT("Call delete_actor then spawn_blueprint_actor, or pass replace_existing=true."));
+                    return Err;
+                }
+
+                FString FreeError;
+                if (!FreeActorNameAndDestroy(World, Existing, FreeError))
+                {
+                    return FUnrealMCPCommonUtils::CreateErrorResponse(
+                        FString::Printf(TEXT("replace_existing: %s"), *FreeError));
+                }
+                bReplacedExisting = true;
+                break;
             }
         }
     }
@@ -1549,14 +1654,20 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
         NewActor->SetActorLabel(*ActorName);
         TSharedPtr<FJsonObject> ResultObj = FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
         ResultObj->SetBoolField(TEXT("success"), true);
+        ResultObj->SetBoolField(TEXT("replaced_existing"), bReplacedExisting);
         return ResultObj;
     }
 
-    return FUnrealMCPCommonUtils::CreateErrorResponse(
+    TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(
             TEXT("Failed to spawn blueprint actor '%s' (name '%s' may already be in use or class failed to spawn)"),
             *BlueprintName,
             *ActorName));
+    Err->SetStringField(TEXT("error_code"), TEXT("spawn_failed"));
+    Err->SetStringField(
+        TEXT("recovery_hint"),
+        TEXT("If the name was just deleted, retry once or use a unique name. Prefer replace_existing=true for respawns."));
+    return Err;
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleFocusViewport(const TSharedPtr<FJsonObject>& Params)

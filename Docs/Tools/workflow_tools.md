@@ -41,12 +41,28 @@ Use a **unique** `name`.
 2. `rebuild_blueprint_graph`
 3. `compile_blueprint` when `compile=True`
 
+### `respawn_actor_by_class(class_path, name, location, rotation, scale)`
+
+**DESTRUCTIVE**.
+
+Spawns with `replace_existing=true` (plugin `handler_build` ≥ `2026-07-25.4`, EditorDestroyActor + CollectGarbage). Falls back to delete + retry spawn on older plugins.
+
+### `verify_after_mutate(actor_name="", take_screenshot=True, screenshot_path="", check_play_state=True)`
+
+Read-only post-mutation check:
+
+- level + viewport status
+- optional actor properties
+- optional screenshot (default under `%TEMP%/unreal_mcp_screenshots`)
+- optional play state
+
 ## Agent policy
 
-1. Call `editor_preflight` before mutating.
+1. Call `editor_preflight` before mutating. Check `handler_build` / `handler_build_mismatch`.
 2. Prefer workflow + atomic rebuild tools over many `add_*` / `connect_*` steps.
-3. Never reuse actor names that may still exist in the level.
-4. Treat descriptions marked **DESTRUCTIVE** as project-changing.
+3. Prefer `replace_existing=true` or `respawn_actor_by_class` over fragile delete+spawn races.
+4. Call `verify_after_mutate` after meaningful mutations.
+5. Treat descriptions marked **DESTRUCTIVE** as project-changing.
 
 ## Related
 

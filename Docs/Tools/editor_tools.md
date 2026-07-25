@@ -146,17 +146,17 @@ Capture the active Unreal Editor viewport to a PNG file.
 - `get_actors_in_level()` - List actors in the current level
 - `find_actors_by_name(pattern)` - Find actors by name pattern
 - `spawn_actor(name, type, location=[0,0,0], rotation=[0,0,0])` - Spawn a new actor
-- `delete_actor(name)` - Delete an actor by name
+- `spawn_actor_by_class(class_path, name="", ..., replace_existing=False)` - Spawn any Actor class/BP; `replace_existing` uses EditorDestroyActor then respawn
+- `delete_actor(name)` - Delete an actor by name (`EditorDestroyActor`; frees name for reuse)
 - `set_actor_transform(name, location=None, rotation=None, scale=None)` - Update actor transform
 - `get_actor_properties(name)` - Inspect actor properties
 - `set_actor_property(name, property_name, property_value)` - Set a single actor property
-- `spawn_blueprint_actor(blueprint_name, actor_name, location=[0,0,0], rotation=[0,0,0])` - Spawn an actor from a Blueprint class
+- `spawn_blueprint_actor(blueprint_name, actor_name, ..., replace_existing=False)` - Spawn from a Blueprint class
 
 ## Recommended Self-Check Flow
 
-1. Call `get_bridge_status()` to verify the live editor session and routed commands.
+1. Call `get_bridge_status()` / `editor_preflight()` — check `protocol_version`, `plugin.handler_build`, `handler_build_mismatch`.
 2. Call `get_level_status()` to verify which map is loaded and whether it is dirty.
 3. Call `get_viewport_status()` to verify the viewport is available.
-4. Call `focus_viewport(...)` to position the camera.
-5. Call `take_screenshot(...)` to capture evidence of the editor state.
-6. Call `get_play_state()` / `start_pie()` / `get_output_log()` / `get_message_log()` when runtime validation is needed.
+4. Mutate (prefer workflow tools + `replace_existing` for named respawns).
+5. Call `verify_after_mutate(...)` (or `take_screenshot` / `get_play_state`) to close the loop.

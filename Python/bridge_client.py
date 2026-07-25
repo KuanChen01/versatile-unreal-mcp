@@ -105,24 +105,24 @@ def normalize_response(
             "meta": meta,
         }
 
-    if response.get("status") == "error":
+    if response.get("status") == "error" or response.get("success") is False:
         error_message = response.get("error") or response.get("message") or "Unknown error"
-        out = {
+        out: Dict[str, Any] = {
             "success": False,
             "message": error_message,
             "error": error_message,
             "meta": meta,
         }
-        return rewrite_unknown_command_message(out, command_name)
-
-    if response.get("success") is False:
-        error_message = response.get("error") or response.get("message") or "Unknown error"
-        out = {
-            "success": False,
-            "message": error_message,
-            "error": error_message,
-            "meta": meta,
-        }
+        # Preserve structured plugin fields when present (error_code, recovery_hint, …).
+        result = response.get("result")
+        if isinstance(result, dict):
+            for key, value in result.items():
+                if key in ("success",):
+                    continue
+                out.setdefault(key, value)
+        for key in ("error_code", "recovery_hint", "name_freed", "replaced_existing"):
+            if key in response and key not in out:
+                out[key] = response[key]
         return rewrite_unknown_command_message(out, command_name)
 
     result = response.get("result")
