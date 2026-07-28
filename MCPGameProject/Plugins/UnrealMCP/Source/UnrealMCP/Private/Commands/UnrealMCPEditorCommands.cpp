@@ -38,9 +38,21 @@
 #include "UObject/SoftObjectPath.h"
 #include "UObject/UObjectGlobals.h"
 #include "Misc/Guid.h"
+#include "ScopedTransaction.h"
+#include "Templates/UniquePtr.h"
+#include "Editor/Transactor.h"
 
 namespace
 {
+	// Tracks an MCP-opened outer transaction (half-transaction scope for multi-step agent recipes).
+	int32 GMCPOpenTransactionIndex = INDEX_NONE;
+	FString GMCPOpenTransactionDescription;
+
+	bool HasOpenMCPTransaction()
+	{
+		return GMCPOpenTransactionIndex != INDEX_NONE;
+	}
+
 	/**
 	 * Free an actor's UObject name then EditorDestroy it.
 	 * IMPORTANT: never Rename into GetTransientPackage() — that leaves the actor without a
@@ -61,10 +73,11 @@ namespace
 			*FGuid::NewGuid().ToString(EGuidFormats::Digits));
 
 		// Rename in-place (Outer=nullptr keeps current outer / level package).
+		// Keep RF_Transactional path: do not use REN_NonTransactional so undo can reverse destroy.
 		const bool bRenamed = Actor->Rename(
 			*TempName,
 			nullptr,
-			REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders | REN_NonTransactional);
+			REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
 		if (!bRenamed)
 		{
 			OutError = FString::Printf(TEXT("Failed to rename actor '%s' to free its name"), *OriginalName);
@@ -77,6 +90,37 @@ namespace
 			return false;
 		}
 		return true;
+	}
+
+	TSharedPtr<FJsonObject> TransactionStatusPayload()
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetBoolField(TEXT("success"), true);
+		Obj->SetBoolField(TEXT("mcp_transaction_open"), HasOpenMCPTransaction());
+		Obj->SetNumberField(TEXT("mcp_transaction_index"), GMCPOpenTransactionIndex);
+		Obj->SetStringField(TEXT("mcp_transaction_description"), GMCPOpenTransactionDescription);
+
+		bool bCanUndo = false;
+		bool bCanRedo = false;
+		FString UndoTitle;
+		FString RedoTitle;
+		if (GEditor && GEditor->Trans)
+		{
+			bCanUndo = GEditor->Trans->CanUndo();
+			bCanRedo = GEditor->Trans->CanRedo();
+			// Titles are best-effort; API varies slightly across engine minors.
+			UndoTitle = bCanUndo ? TEXT("(available)") : TEXT("");
+			RedoTitle = bCanRedo ? TEXT("(available)") : TEXT("");
+		}
+		Obj->SetBoolField(TEXT("can_undo"), bCanUndo);
+		Obj->SetBoolField(TEXT("can_redo"), bCanRedo);
+		Obj->SetStringField(TEXT("undo_title"), UndoTitle);
+		Obj->SetStringField(TEXT("redo_title"), RedoTitle);
+		Obj->SetStringField(
+			TEXT("policy"),
+			TEXT("Call begin_transaction before multi-step mutations; end_transaction on success; "
+			     "cancel_transaction on failure before end; or undo_transaction after partial failure."));
+		return Obj;
 	}
 }
 
@@ -437,6 +481,30 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
     else if (CommandType == TEXT("delete_actor"))
     {
         return HandleDeleteActor(Params);
+    }
+    else if (CommandType == TEXT("begin_transaction"))
+    {
+        return HandleBeginTransaction(Params);
+    }
+    else if (CommandType == TEXT("end_transaction"))
+    {
+        return HandleEndTransaction(Params);
+    }
+    else if (CommandType == TEXT("cancel_transaction"))
+    {
+        return HandleCancelTransaction(Params);
+    }
+    else if (CommandType == TEXT("undo_transaction"))
+    {
+        return HandleUndoTransaction(Params);
+    }
+    else if (CommandType == TEXT("redo_transaction"))
+    {
+        return HandleRedoTransaction(Params);
+    }
+    else if (CommandType == TEXT("get_transaction_status"))
+    {
+        return HandleGetTransactionStatus(Params);
     }
     else if (CommandType == TEXT("set_actor_transform"))
     {
@@ -1019,6 +1087,14 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteActor(const TShare
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No editor world available"));
     }
 
+    // Single-op undo unit when not already inside an MCP outer transaction.
+    TUniquePtr<FScopedTransaction> ScopedTx;
+    if (!HasOpenMCPTransaction())
+    {
+        ScopedTx = MakeUnique<FScopedTransaction>(
+            FText::FromString(FString::Printf(TEXT("MCP Delete Actor '%s'"), *ActorName)));
+    }
+
     TArray<AActor*> AllActors;
     UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
     
@@ -1304,6 +1380,15 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActorByClass(const 
     if (Params->HasField(TEXT("replace_existing")))
     {
         bReplaceExisting = Params->GetBoolField(TEXT("replace_existing"));
+    }
+
+    TUniquePtr<FScopedTransaction> ScopedTx;
+    if (!HasOpenMCPTransaction())
+    {
+        ScopedTx = MakeUnique<FScopedTransaction>(FText::FromString(
+            ActorName.IsEmpty()
+                ? TEXT("MCP Spawn Actor By Class")
+                : FString::Printf(TEXT("MCP Spawn Actor '%s'"), *ActorName)));
     }
 
     bool bReplacedExisting = false;
@@ -1597,6 +1682,13 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
         bReplaceExisting = Params->GetBoolField(TEXT("replace_existing"));
     }
 
+    TUniquePtr<FScopedTransaction> ScopedTx;
+    if (!HasOpenMCPTransaction())
+    {
+        ScopedTx = MakeUnique<FScopedTransaction>(
+            FText::FromString(FString::Printf(TEXT("MCP Spawn Blueprint Actor '%s'"), *ActorName)));
+    }
+
     // Guard name collisions up front (delete+respawn races used to hit a fatal check in LevelActor.cpp).
     bool bReplacedExisting = false;
     {
@@ -1823,4 +1915,230 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
     ResultObj->SetStringField(TEXT("filepath"), FilePath);
     ResultObj->SetArrayField(TEXT("size"), MakeIntPointArray(ViewportSize));
     return ResultObj;
-} 
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleBeginTransaction(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Editor not available"));
+    }
+    if (HasOpenMCPTransaction())
+    {
+        TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(
+                TEXT("MCP transaction already open (index=%d, description='%s'). end_transaction or cancel_transaction first."),
+                GMCPOpenTransactionIndex,
+                *GMCPOpenTransactionDescription));
+        Err->SetStringField(TEXT("error_code"), TEXT("transaction_already_open"));
+        return Err;
+    }
+
+    FString Description = TEXT("MCP Transaction");
+    Params->TryGetStringField(TEXT("description"), Description);
+    if (Description.IsEmpty())
+    {
+        Description = TEXT("MCP Transaction");
+    }
+
+    GMCPOpenTransactionIndex = GEditor->BeginTransaction(FText::FromString(Description));
+    GMCPOpenTransactionDescription = Description;
+
+    TSharedPtr<FJsonObject> Result = TransactionStatusPayload();
+    Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Began transaction: %s"), *Description));
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleEndTransaction(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Editor not available"));
+    }
+    if (!HasOpenMCPTransaction())
+    {
+        TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("No open MCP transaction to end. Call begin_transaction first."));
+        Err->SetStringField(TEXT("error_code"), TEXT("no_open_transaction"));
+        return Err;
+    }
+
+    const FString ClosedDescription = GMCPOpenTransactionDescription;
+    const int32 ClosedIndex = GMCPOpenTransactionIndex;
+    GEditor->EndTransaction();
+    GMCPOpenTransactionIndex = INDEX_NONE;
+    GMCPOpenTransactionDescription.Reset();
+
+    TSharedPtr<FJsonObject> Result = TransactionStatusPayload();
+    Result->SetStringField(
+        TEXT("message"),
+        FString::Printf(TEXT("Ended transaction index=%d ('%s')"), ClosedIndex, *ClosedDescription));
+    Result->SetNumberField(TEXT("closed_transaction_index"), ClosedIndex);
+    Result->SetStringField(TEXT("closed_transaction_description"), ClosedDescription);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCancelTransaction(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Editor not available"));
+    }
+    if (!HasOpenMCPTransaction())
+    {
+        TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("No open MCP transaction to cancel."));
+        Err->SetStringField(TEXT("error_code"), TEXT("no_open_transaction"));
+        return Err;
+    }
+
+    const FString ClosedDescription = GMCPOpenTransactionDescription;
+    const int32 ClosedIndex = GMCPOpenTransactionIndex;
+
+    // Editor CancelTransaction often does not reverse SpawnActor for agent multi-step groups.
+    // Reliable half-cancel: EndTransaction then Undo without redo (discard work, no redo stack entry).
+    GEditor->EndTransaction();
+    GMCPOpenTransactionIndex = INDEX_NONE;
+    GMCPOpenTransactionDescription.Reset();
+
+    bool bUndone = false;
+    if (GEditor->Trans && GEditor->Trans->CanUndo())
+    {
+        bUndone = GEditor->UndoTransaction(/*bCanRedo=*/false);
+    }
+
+    TSharedPtr<FJsonObject> Result = TransactionStatusPayload();
+    Result->SetBoolField(TEXT("discarded_via_end_and_undo"), true);
+    Result->SetBoolField(TEXT("undone"), bUndone);
+    Result->SetStringField(
+        TEXT("message"),
+        FString::Printf(
+            TEXT("Cancelled transaction index=%d ('%s') via end+undo (undone=%s)"),
+            ClosedIndex,
+            *ClosedDescription,
+            bUndone ? TEXT("true") : TEXT("false")));
+    Result->SetNumberField(TEXT("cancelled_transaction_index"), ClosedIndex);
+    Result->SetStringField(TEXT("cancelled_transaction_description"), ClosedDescription);
+    if (!bUndone)
+    {
+        Result->SetStringField(
+            TEXT("recovery_hint"),
+            TEXT("Cancel end+undo did not reverse changes; try undo_transaction manually or delete created actors."));
+    }
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleUndoTransaction(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Editor not available"));
+    }
+    if (HasOpenMCPTransaction())
+    {
+        TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Cannot undo while an MCP transaction is still open. end_transaction or cancel_transaction first."));
+        Err->SetStringField(TEXT("error_code"), TEXT("transaction_open"));
+        return Err;
+    }
+
+    int32 Steps = 1;
+    if (Params->HasField(TEXT("steps")))
+    {
+        Steps = FMath::Clamp(static_cast<int32>(Params->GetNumberField(TEXT("steps"))), 1, 50);
+    }
+
+    int32 Undone = 0;
+    for (int32 i = 0; i < Steps; ++i)
+    {
+        if (!GEditor->Trans || !GEditor->Trans->CanUndo())
+        {
+            break;
+        }
+        if (!GEditor->UndoTransaction())
+        {
+            break;
+        }
+        ++Undone;
+    }
+
+    TSharedPtr<FJsonObject> Result = TransactionStatusPayload();
+    Result->SetNumberField(TEXT("steps_requested"), Steps);
+    Result->SetNumberField(TEXT("steps_undone"), Undone);
+    Result->SetBoolField(TEXT("success"), Undone > 0);
+    if (Undone == 0)
+    {
+        Result->SetStringField(TEXT("error"), TEXT("Nothing to undo (or undo failed)"));
+        Result->SetStringField(TEXT("message"), TEXT("Nothing to undo (or undo failed)"));
+        Result->SetStringField(TEXT("error_code"), TEXT("nothing_to_undo"));
+    }
+    else
+    {
+        Result->SetStringField(
+            TEXT("message"),
+            FString::Printf(TEXT("Undid %d transaction step(s)"), Undone));
+    }
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleRedoTransaction(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Editor not available"));
+    }
+    if (HasOpenMCPTransaction())
+    {
+        TSharedPtr<FJsonObject> Err = FUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("Cannot redo while an MCP transaction is still open. end_transaction or cancel_transaction first."));
+        Err->SetStringField(TEXT("error_code"), TEXT("transaction_open"));
+        return Err;
+    }
+
+    int32 Steps = 1;
+    if (Params->HasField(TEXT("steps")))
+    {
+        Steps = FMath::Clamp(static_cast<int32>(Params->GetNumberField(TEXT("steps"))), 1, 50);
+    }
+
+    int32 Redone = 0;
+    for (int32 i = 0; i < Steps; ++i)
+    {
+        if (!GEditor->Trans || !GEditor->Trans->CanRedo())
+        {
+            break;
+        }
+        if (!GEditor->RedoTransaction())
+        {
+            break;
+        }
+        ++Redone;
+    }
+
+    TSharedPtr<FJsonObject> Result = TransactionStatusPayload();
+    Result->SetNumberField(TEXT("steps_requested"), Steps);
+    Result->SetNumberField(TEXT("steps_redone"), Redone);
+    Result->SetBoolField(TEXT("success"), Redone > 0);
+    if (Redone == 0)
+    {
+        Result->SetStringField(TEXT("error"), TEXT("Nothing to redo (or redo failed)"));
+        Result->SetStringField(TEXT("message"), TEXT("Nothing to redo (or redo failed)"));
+        Result->SetStringField(TEXT("error_code"), TEXT("nothing_to_redo"));
+    }
+    else
+    {
+        Result->SetStringField(
+            TEXT("message"),
+            FString::Printf(TEXT("Redid %d transaction step(s)"), Redone));
+    }
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetTransactionStatus(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Editor not available"));
+    }
+    return TransactionStatusPayload();
+}

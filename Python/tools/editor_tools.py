@@ -32,7 +32,7 @@ def register_editor_tools(mcp: FastMCP):
         from unreal_mcp_server import SERVER_NAME, SERVER_VERSION
 
         # Expected stamp after this repo's Python + plugin co-upgrade (bump with C++ UnrealMCPHandlerBuild).
-        EXPECTED_HANDLER_BUILD = "2026-07-25.4"
+        EXPECTED_HANDLER_BUILD = "2026-07-25.6"
 
         normalized = run_bridge_command("get_bridge_status")
         normalized["server"] = {
@@ -64,7 +64,7 @@ def register_editor_tools(mcp: FastMCP):
             normalized["handler_build_mismatch"] = True
             normalized["recovery_hint"] = (
                 "Plugin did not report handler_build (older binary). "
-                "Upgrade UnrealMCP plugin to 1.1+ / handler_build 2026-07-25.4 and full restart Editor."
+                "Upgrade UnrealMCP plugin to 1.1+ / handler_build 2026-07-25.6 and full restart Editor."
             )
         else:
             normalized["handler_build_mismatch"] = False
@@ -266,7 +266,7 @@ def register_editor_tools(mcp: FastMCP):
             name: Optional unique actor name
             location / rotation / scale: Transform
             replace_existing: If true and name is taken, EditorDestroyActor then respawn
-                (requires plugin handler_build >= 2026-07-25.4)
+                (requires plugin handler_build >= 2026-07-25.6)
         """
         params: Dict[str, Any] = {
             "class_path": class_path,
@@ -471,5 +471,47 @@ def register_editor_tools(mcp: FastMCP):
                 }
             params[param_name] = [float(val) for val in param_value]
         return run_bridge_command("spawn_blueprint_actor", params)
+
+    @mcp.tool()
+    def begin_transaction(ctx: Context, description: str = "MCP Transaction") -> Dict[str, Any]:
+        """
+        Begin an Editor undo/redo transaction (half-transaction scope for multi-step agent work).
+
+        Pair with end_transaction on success or cancel_transaction on failure.
+        Requires plugin handler_build >= 2026-07-25.6.
+        """
+        return run_bridge_command(
+            "begin_transaction",
+            {"description": description or "MCP Transaction"},
+        )
+
+    @mcp.tool()
+    def end_transaction(ctx: Context) -> Dict[str, Any]:
+        """End the open MCP Editor transaction (commits it to the undo buffer)."""
+        return run_bridge_command("end_transaction", {})
+
+    @mcp.tool()
+    def cancel_transaction(ctx: Context) -> Dict[str, Any]:
+        """Cancel the open MCP Editor transaction and discard its changes."""
+        return run_bridge_command("cancel_transaction", {})
+
+    @mcp.tool()
+    def undo_transaction(ctx: Context, steps: int = 1) -> Dict[str, Any]:
+        """
+        Undo one or more Editor transactions (default 1).
+
+        Cannot run while an MCP begin_transaction is still open.
+        """
+        return run_bridge_command("undo_transaction", {"steps": max(1, min(int(steps), 50))})
+
+    @mcp.tool()
+    def redo_transaction(ctx: Context, steps: int = 1) -> Dict[str, Any]:
+        """Redo one or more Editor transactions (default 1)."""
+        return run_bridge_command("redo_transaction", {"steps": max(1, min(int(steps), 50))})
+
+    @mcp.tool()
+    def get_transaction_status(ctx: Context) -> Dict[str, Any]:
+        """Report MCP open-transaction state and whether Editor can undo/redo."""
+        return run_bridge_command("get_transaction_status", {})
 
     logger.info("Editor tools registered successfully")

@@ -47,7 +47,7 @@ def register_workflow_tools(mcp: FastMCP) -> None:
         Checks bridge/protocol, editor connection, level status, and viewport.
         Prefer this (or get_bridge_status) before spawn/delete/rebuild tools.
         """
-        EXPECTED_HANDLER_BUILD = "2026-07-25.4"
+        EXPECTED_HANDLER_BUILD = "2026-07-25.6"
         bridge = run_bridge_command("get_bridge_status")
         if not bridge.get("success", False):
             return _fail(
@@ -349,7 +349,7 @@ def register_workflow_tools(mcp: FastMCP) -> None:
 
         Preferred over manual delete_actor + spawn when reusing a fixed actor_name.
         Requires plugin handler_build >= 2026-07-25.4 for native replace_existing
-        (EditorDestroyActor + CollectGarbage). Falls back to delete+retry spawn.
+        (in-place rename + EditorDestroyActor). Falls back to delete+retry spawn.
         """
         import time
 
@@ -417,8 +417,39 @@ def register_workflow_tools(mcp: FastMCP) -> None:
             first_spawn=spawn,
             delete=delete,
             spawn=spawn2,
-            recovery_hint="Prefer a unique actor name, or upgrade plugin to handler_build 2026-07-25.4+",
+            recovery_hint="Prefer a unique actor name, or upgrade plugin to handler_build 2026-07-25.6+",
         )
+
+    @mcp.tool()
+    def undo_last(
+        ctx: Context,
+        steps: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Undo the last N Editor transactions (agent recovery after partial multi-step failure).
+
+        Prefer begin_transaction/end_transaction/cancel_transaction for intentional multi-step
+        scopes. This is the escape hatch when steps already committed as separate undo units.
+        """
+        steps = max(1, min(int(steps), 50))
+        status_before = run_bridge_command("get_transaction_status")
+        undo = run_bridge_command("undo_transaction", {"steps": steps})
+        status_after = run_bridge_command("get_transaction_status")
+        ok = bool(undo.get("success", False))
+        return {
+            "success": ok,
+            "message": undo.get("message") or ("Undo OK" if ok else "Undo failed"),
+            "error": None if ok else (undo.get("error") or undo.get("message")),
+            "steps_requested": steps,
+            "steps_undone": undo.get("steps_undone"),
+            "before": status_before,
+            "undo": undo,
+            "after": status_after,
+            "hints": [
+                "For multi-step recipes: begin_transaction → mutate → end_transaction (or cancel_transaction).",
+                "Single spawn/delete already create scoped undo units when no outer transaction is open.",
+            ],
+        }
 
     @mcp.tool()
     def verify_after_mutate(

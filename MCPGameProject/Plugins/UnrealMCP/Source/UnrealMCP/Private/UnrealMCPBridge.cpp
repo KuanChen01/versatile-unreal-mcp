@@ -72,7 +72,7 @@ namespace
 
     // Bump when command handlers change in a way agents must detect after hot-reload/copy drift.
     // Surfaced on get_bridge_status as plugin.handler_build.
-    const FString UnrealMCPHandlerBuild = TEXT("2026-07-25.4");
+    const FString UnrealMCPHandlerBuild = TEXT("2026-07-25.6");
 
     const TArray<FString>& GetEditorCommandTypes()
     {
@@ -99,7 +99,13 @@ namespace
             TEXT("get_viewport_status"),
             TEXT("spawn_blueprint_actor"),
             TEXT("focus_viewport"),
-            TEXT("take_screenshot")
+            TEXT("take_screenshot"),
+            TEXT("begin_transaction"),
+            TEXT("end_transaction"),
+            TEXT("cancel_transaction"),
+            TEXT("undo_transaction"),
+            TEXT("redo_transaction"),
+            TEXT("get_transaction_status")
         };
         return CommandTypes;
     }
@@ -258,6 +264,7 @@ namespace
         FeaturesObject->SetBoolField(TEXT("replace_existing_spawn"), true);
         FeaturesObject->SetBoolField(TEXT("editor_destroy_on_delete"), true);
         FeaturesObject->SetBoolField(TEXT("request_id_echo"), true);
+        FeaturesObject->SetBoolField(TEXT("editor_transactions"), true);
         PluginObject->SetObjectField(TEXT("features"), FeaturesObject);
         ResultObject->SetObjectField(TEXT("plugin"), PluginObject);
 

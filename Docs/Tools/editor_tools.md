@@ -160,3 +160,16 @@ Capture the active Unreal Editor viewport to a PNG file.
 3. Call `get_viewport_status()` to verify the viewport is available.
 4. Mutate (prefer workflow tools + `replace_existing` for named respawns).
 5. Call `verify_after_mutate(...)` (or `take_screenshot` / `get_play_state`) to close the loop.
+
+## Half-transaction / undo (handler_build >= 2026-07-25.6)
+
+| Tool | Role |
+| --- | --- |
+| `begin_transaction(description)` | Open an Editor undo group for multi-step agent work |
+| `end_transaction()` | Commit the open MCP group into the undo buffer |
+| `cancel_transaction()` | Discard the open MCP group |
+| `undo_transaction(steps=1)` / `undo_last(steps=1)` | Undo committed steps (not while a group is open) |
+| `redo_transaction(steps=1)` | Redo |
+| `get_transaction_status()` | `mcp_transaction_open`, `can_undo` / `can_redo` |
+
+**Agent policy:** multi-step → `begin` → mutate → `end` on success / `cancel` on failure; or `undo_last` after partial failure when steps already committed. Single spawn/delete already use `FScopedTransaction` when no outer MCP group is open.

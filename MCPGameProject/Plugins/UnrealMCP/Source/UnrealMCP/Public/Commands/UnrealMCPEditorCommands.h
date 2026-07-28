@@ -45,4 +45,12 @@ private:
     TSharedPtr<FJsonObject> HandleGetViewportStatus(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleFocusViewport(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleTakeScreenshot(const TSharedPtr<FJsonObject>& Params);
+
+    // Half-transaction / undo (Editor Trans buffer)
+    TSharedPtr<FJsonObject> HandleBeginTransaction(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleEndTransaction(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleCancelTransaction(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleUndoTransaction(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRedoTransaction(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetTransactionStatus(const TSharedPtr<FJsonObject>& Params);
 };

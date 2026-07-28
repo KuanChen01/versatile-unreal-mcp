@@ -47,6 +47,10 @@ Use a **unique** `name`.
 
 Spawns with `replace_existing=true` (plugin `handler_build` ≥ `2026-07-25.4`, EditorDestroyActor + CollectGarbage). Falls back to delete + retry spawn on older plugins.
 
+### `undo_last(steps=1)`
+
+Undo the last N Editor transactions (recovery after partial multi-step failure). Prefer `begin_transaction` / `end_transaction` / `cancel_transaction` for intentional scopes.
+
 ### `verify_after_mutate(actor_name="", take_screenshot=True, screenshot_path="", check_play_state=True)`
 
 Read-only post-mutation check:
