@@ -47,7 +47,7 @@ def register_workflow_tools(mcp: FastMCP) -> None:
         Checks bridge/protocol, editor connection, level status, and viewport.
         Prefer this (or get_bridge_status) before spawn/delete/rebuild tools.
         """
-        EXPECTED_HANDLER_BUILD = "2026-07-25.6"
+        EXPECTED_HANDLER_BUILD = "2026-08-11.2"
         bridge = run_bridge_command("get_bridge_status")
         if not bridge.get("success", False):
             return _fail(

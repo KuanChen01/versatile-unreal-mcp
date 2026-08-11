@@ -1348,6 +1348,473 @@ bool FUnrealMCPMaterialCommands::SaveLoadedAsset(UObject* Asset, const FString& 
     return false;
 }
 
+namespace
+{
+    static bool IsNamedScriptStruct(const UScriptStruct* Struct, const TCHAR* ExpectedName)
+    {
+        return Struct != nullptr && Struct->GetFName() == FName(ExpectedName);
+    }
+
+    static bool IsExpressionInputProperty(const FStructProperty* StructProp)
+    {
+        return StructProp != nullptr && IsNamedScriptStruct(StructProp->Struct, TEXT("ExpressionInput"));
+    }
+
+    static bool IsExpressionOutputProperty(const FStructProperty* StructProp)
+    {
+        return StructProp != nullptr && IsNamedScriptStruct(StructProp->Struct, TEXT("ExpressionOutput"));
+    }
+}
+
+TArray<TSharedPtr<FJsonValue>> FUnrealMCPMaterialCommands::ExpressionInputsToJson(UMaterialExpression* Expression) const
+{
+    TArray<TSharedPtr<FJsonValue>> InputsJson;
+    if (!Expression)
+    {
+        return InputsJson;
+    }
+
+    // Map FExpressionInput* → reflected UPROPERTY name (stable, e.g. "Position").
+    TMap<const FExpressionInput*, FString> PropertyNamesByPtr;
+    for (TFieldIterator<FProperty> PropIt(Expression->GetClass()); PropIt; ++PropIt)
+    {
+        FStructProperty* StructProp = CastField<FStructProperty>(*PropIt);
+        if (!IsExpressionInputProperty(StructProp))
+        {
+            continue;
+        }
+
+        const FExpressionInput* InputPtr = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+        PropertyNamesByPtr.Add(InputPtr, StructProp->GetName());
+    }
+
+    const int32 InputCount = Expression->CountInputs();
+
+    for (int32 InputIndex = 0; InputIndex < InputCount; ++InputIndex)
+    {
+        FExpressionInput* Input = Expression->GetInput(InputIndex);
+        if (!Input)
+        {
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> InputObject = MakeShared<FJsonObject>();
+        InputObject->SetNumberField(TEXT("index"), InputIndex);
+
+        const FString DisplayName = Expression->GetInputName(InputIndex).ToString();
+        InputObject->SetStringField(TEXT("display_name"), DisplayName);
+        InputObject->SetStringField(TEXT("name"), DisplayName);
+
+        if (const FString* PropertyName = PropertyNamesByPtr.Find(Input))
+        {
+            InputObject->SetStringField(TEXT("property_name"), *PropertyName);
+        }
+        else
+        {
+            InputObject->SetStringField(TEXT("property_name"), TEXT(""));
+        }
+
+        InputObject->SetBoolField(TEXT("connected"), Input->Expression != nullptr);
+        if (Input->Expression)
+        {
+            InputObject->SetStringField(TEXT("connected_expression"), Input->Expression->GetName());
+            InputObject->SetStringField(
+                TEXT("connected_expression_guid"),
+                GuidToStableString(Input->Expression->GetMaterialExpressionId()));
+            InputObject->SetNumberField(TEXT("output_index"), Input->OutputIndex);
+        }
+
+        InputsJson.Add(MakeShared<FJsonValueObject>(InputObject));
+    }
+
+    return InputsJson;
+}
+
+TArray<TSharedPtr<FJsonValue>> FUnrealMCPMaterialCommands::ExpressionOutputsToJson(UMaterialExpression* Expression) const
+{
+    TArray<TSharedPtr<FJsonValue>> OutputsJson;
+    if (!Expression)
+    {
+        return OutputsJson;
+    }
+
+    // Prefer reflected FExpressionOutput UPROPERTYs (stable across UE versions).
+    int32 OutputIndex = 0;
+    for (TFieldIterator<FProperty> PropIt(Expression->GetClass()); PropIt; ++PropIt)
+    {
+        FStructProperty* StructProp = CastField<FStructProperty>(*PropIt);
+        if (!IsExpressionOutputProperty(StructProp))
+        {
+            continue;
+        }
+
+        const FExpressionOutput* OutputPtr = StructProp->ContainerPtrToValuePtr<FExpressionOutput>(Expression);
+        if (!OutputPtr)
+        {
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> OutputObject = MakeShared<FJsonObject>();
+        OutputObject->SetNumberField(TEXT("index"), OutputIndex);
+        const FString OutputName = OutputPtr->OutputName.ToString();
+        // Empty OutputName is the default RGB/result pin on many expressions.
+        OutputObject->SetStringField(TEXT("name"), OutputName);
+        OutputObject->SetStringField(TEXT("display_name"), OutputName.IsEmpty() ? TEXT("") : OutputName);
+        OutputObject->SetStringField(TEXT("property_name"), StructProp->GetName());
+        OutputsJson.Add(MakeShared<FJsonValueObject>(OutputObject));
+        ++OutputIndex;
+    }
+
+    // If no reflected outputs found, still expose a default index-0 pin.
+    if (OutputsJson.Num() == 0)
+    {
+        TSharedPtr<FJsonObject> OutputObject = MakeShared<FJsonObject>();
+        OutputObject->SetNumberField(TEXT("index"), 0);
+        OutputObject->SetStringField(TEXT("name"), TEXT(""));
+        OutputObject->SetStringField(TEXT("display_name"), TEXT(""));
+        OutputObject->SetStringField(TEXT("property_name"), TEXT(""));
+        OutputsJson.Add(MakeShared<FJsonValueObject>(OutputObject));
+    }
+
+    return OutputsJson;
+}
+
+bool FUnrealMCPMaterialCommands::ResolveExpressionInput(
+    UMaterialExpression* Expression,
+    const FString& InputName,
+    int32 InputIndex,
+    int32& OutIndex,
+    FString& OutConnectName,
+    FString& OutPropertyName,
+    FString& OutErrorMessage) const
+{
+    OutIndex = INDEX_NONE;
+    OutConnectName.Empty();
+    OutPropertyName.Empty();
+    OutErrorMessage.Empty();
+
+    if (!Expression)
+    {
+        OutErrorMessage = TEXT("Invalid material expression");
+        return false;
+    }
+
+    const int32 InputCount = Expression->CountInputs();
+
+    if (InputCount <= 0)
+    {
+        OutErrorMessage = FString::Printf(
+            TEXT("Expression '%s' has no inputs"),
+            *Expression->GetName());
+        return false;
+    }
+
+    // 1) Explicit index wins.
+    if (InputIndex >= 0)
+    {
+        if (InputIndex >= InputCount)
+        {
+            OutErrorMessage = FString::Printf(
+                TEXT("Input index %d out of range for '%s' (0..%d)"),
+                InputIndex, *Expression->GetName(), InputCount - 1);
+            return false;
+        }
+        OutIndex = InputIndex;
+        OutConnectName = Expression->GetInputName(InputIndex).ToString();
+
+        // Best-effort property name for response metadata.
+        FExpressionInput* Input = Expression->GetInput(InputIndex);
+        for (TFieldIterator<FProperty> PropIt(Expression->GetClass()); PropIt; ++PropIt)
+        {
+            FStructProperty* StructProp = CastField<FStructProperty>(*PropIt);
+            if (!IsExpressionInputProperty(StructProp))
+            {
+                continue;
+            }
+            if (StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression) == Input)
+            {
+                OutPropertyName = StructProp->GetName();
+                break;
+            }
+        }
+        return true;
+    }
+
+    // 2) Empty name with single input → first input.
+    FString Wanted = InputName;
+    Wanted.TrimStartAndEndInline();
+    if (Wanted.IsEmpty())
+    {
+        if (InputCount == 1)
+        {
+            OutIndex = 0;
+            OutConnectName = Expression->GetInputName(0).ToString();
+            return true;
+        }
+        // Empty name with multiple inputs: ConnectMaterialExpressions defaults to first.
+        OutIndex = 0;
+        OutConnectName = Expression->GetInputName(0).ToString();
+        return true;
+    }
+
+    // Build property-name map for reflected FExpressionInput fields.
+    TMap<const FExpressionInput*, FString> PropertyNamesByPtr;
+    for (TFieldIterator<FProperty> PropIt(Expression->GetClass()); PropIt; ++PropIt)
+    {
+        FStructProperty* StructProp = CastField<FStructProperty>(*PropIt);
+        if (!IsExpressionInputProperty(StructProp))
+        {
+            continue;
+        }
+        const FExpressionInput* InputPtr = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+        PropertyNamesByPtr.Add(InputPtr, StructProp->GetName());
+    }
+
+    // 3) Exact display-name match (GetInputName — may be dynamic in UE 5.7+).
+    for (int32 Index = 0; Index < InputCount; ++Index)
+    {
+        const FString DisplayName = Expression->GetInputName(Index).ToString();
+        if (DisplayName.Equals(Wanted, ESearchCase::IgnoreCase))
+        {
+            OutIndex = Index;
+            OutConnectName = DisplayName;
+            if (FExpressionInput* Input = Expression->GetInput(Index))
+            {
+                if (const FString* PropName = PropertyNamesByPtr.Find(Input))
+                {
+                    OutPropertyName = *PropName;
+                }
+            }
+            return true;
+        }
+    }
+
+    // 4) Reflected FExpressionInput property name (stable, e.g. "Position").
+    for (int32 Index = 0; Index < InputCount; ++Index)
+    {
+        FExpressionInput* Input = Expression->GetInput(Index);
+        if (!Input)
+        {
+            continue;
+        }
+        if (const FString* PropName = PropertyNamesByPtr.Find(Input))
+        {
+            if (PropName->Equals(Wanted, ESearchCase::IgnoreCase))
+            {
+                OutIndex = Index;
+                OutConnectName = Expression->GetInputName(Index).ToString();
+                OutPropertyName = *PropName;
+                return true;
+            }
+        }
+    }
+
+    // 5) Soft contains match on display name (e.g. "Position" vs "Absolute World Position").
+    TArray<int32> ContainsMatches;
+    for (int32 Index = 0; Index < InputCount; ++Index)
+    {
+        const FString DisplayName = Expression->GetInputName(Index).ToString();
+        if (DisplayName.Contains(Wanted, ESearchCase::IgnoreCase)
+            || Wanted.Contains(DisplayName, ESearchCase::IgnoreCase))
+        {
+            ContainsMatches.Add(Index);
+        }
+    }
+    if (ContainsMatches.Num() == 1)
+    {
+        OutIndex = ContainsMatches[0];
+        OutConnectName = Expression->GetInputName(OutIndex).ToString();
+        if (FExpressionInput* Input = Expression->GetInput(OutIndex))
+        {
+            if (const FString* PropName = PropertyNamesByPtr.Find(Input))
+            {
+                OutPropertyName = *PropName;
+            }
+        }
+        return true;
+    }
+    if (ContainsMatches.Num() > 1)
+    {
+        OutErrorMessage = FString::Printf(
+            TEXT("Ambiguous input name '%s' on '%s' (%d matches); use to_input_index"),
+            *Wanted, *Expression->GetName(), ContainsMatches.Num());
+        return false;
+    }
+
+    OutErrorMessage = FString::Printf(
+        TEXT("Input '%s' not found on expression '%s'"),
+        *Wanted, *Expression->GetName());
+    return false;
+}
+
+bool FUnrealMCPMaterialCommands::ResolveExpressionOutput(
+    UMaterialExpression* Expression,
+    const FString& OutputName,
+    int32 OutputIndex,
+    int32& OutIndex,
+    FString& OutConnectName,
+    FString& OutErrorMessage) const
+{
+    OutIndex = INDEX_NONE;
+    OutConnectName.Empty();
+    OutErrorMessage.Empty();
+
+    if (!Expression)
+    {
+        OutErrorMessage = TEXT("Invalid material expression");
+        return false;
+    }
+
+    struct FResolvedOutput
+    {
+        int32 Index = 0;
+        FString Name;
+        FString PropertyName;
+    };
+    TArray<FResolvedOutput> Outputs;
+    int32 EnumeratedIndex = 0;
+    for (TFieldIterator<FProperty> PropIt(Expression->GetClass()); PropIt; ++PropIt)
+    {
+        FStructProperty* StructProp = CastField<FStructProperty>(*PropIt);
+        if (!IsExpressionOutputProperty(StructProp))
+        {
+            continue;
+        }
+        const FExpressionOutput* OutputPtr = StructProp->ContainerPtrToValuePtr<FExpressionOutput>(Expression);
+        if (!OutputPtr)
+        {
+            continue;
+        }
+        FResolvedOutput Entry;
+        Entry.Index = EnumeratedIndex++;
+        Entry.Name = OutputPtr->OutputName.ToString();
+        Entry.PropertyName = StructProp->GetName();
+        Outputs.Add(Entry);
+    }
+
+    if (Outputs.Num() <= 0)
+    {
+        // Default result pin; empty name is accepted by ConnectMaterialExpressions.
+        OutIndex = OutputIndex >= 0 ? OutputIndex : 0;
+        OutConnectName = OutputName;
+        return true;
+    }
+
+    if (OutputIndex >= 0)
+    {
+        if (OutputIndex >= Outputs.Num())
+        {
+            OutErrorMessage = FString::Printf(
+                TEXT("Output index %d out of range for '%s' (0..%d)"),
+                OutputIndex, *Expression->GetName(), Outputs.Num() - 1);
+            return false;
+        }
+        OutIndex = OutputIndex;
+        OutConnectName = Outputs[OutputIndex].Name;
+        return true;
+    }
+
+    FString Wanted = OutputName;
+    Wanted.TrimStartAndEndInline();
+    if (Wanted.IsEmpty())
+    {
+        OutIndex = 0;
+        OutConnectName = Outputs[0].Name;
+        return true;
+    }
+
+    for (const FResolvedOutput& Entry : Outputs)
+    {
+        if (Entry.Name.Equals(Wanted, ESearchCase::IgnoreCase)
+            || Entry.PropertyName.Equals(Wanted, ESearchCase::IgnoreCase))
+        {
+            OutIndex = Entry.Index;
+            OutConnectName = Entry.Name;
+            return true;
+        }
+    }
+
+    if (Wanted.IsNumeric())
+    {
+        const int32 Parsed = FCString::Atoi(*Wanted);
+        if (Parsed >= 0 && Parsed < Outputs.Num())
+        {
+            OutIndex = Parsed;
+            OutConnectName = Outputs[Parsed].Name;
+            return true;
+        }
+    }
+
+    OutErrorMessage = FString::Printf(
+        TEXT("Output '%s' not found on expression '%s'"),
+        *Wanted, *Expression->GetName());
+    return false;
+}
+
+bool FUnrealMCPMaterialCommands::TryConnectMaterialExpressionsResolved(
+    UMaterialExpression* FromExpression,
+    const FString& FromOutputName,
+    int32 FromOutputIndex,
+    UMaterialExpression* ToExpression,
+    const FString& ToInputName,
+    int32 ToInputIndex,
+    FString& OutErrorMessage) const
+{
+    OutErrorMessage.Empty();
+    if (!FromExpression || !ToExpression)
+    {
+        OutErrorMessage = TEXT("Invalid from/to material expression");
+        return false;
+    }
+
+    int32 ResolvedFromIndex = INDEX_NONE;
+    FString ResolvedFromName;
+    if (!ResolveExpressionOutput(FromExpression, FromOutputName, FromOutputIndex, ResolvedFromIndex, ResolvedFromName, OutErrorMessage))
+    {
+        return false;
+    }
+
+    int32 ResolvedToIndex = INDEX_NONE;
+    FString ResolvedToName;
+    FString ResolvedPropertyName;
+    if (!ResolveExpressionInput(ToExpression, ToInputName, ToInputIndex, ResolvedToIndex, ResolvedToName, ResolvedPropertyName, OutErrorMessage))
+    {
+        return false;
+    }
+
+    // Prefer library connect with resolved display names so editor undo/layout stay consistent.
+    if (UMaterialEditingLibrary::ConnectMaterialExpressions(FromExpression, ResolvedFromName, ToExpression, ResolvedToName))
+    {
+        return true;
+    }
+
+    // Fallback: direct pointer connect when display-name matching still fails.
+    FExpressionInput* Input = ToExpression->GetInput(ResolvedToIndex);
+    if (!Input)
+    {
+        OutErrorMessage = FString::Printf(
+            TEXT("Resolved input index %d is null on '%s'"),
+            ResolvedToIndex, *ToExpression->GetName());
+        return false;
+    }
+
+    FromExpression->ConnectExpression(Input, ResolvedFromIndex >= 0 ? ResolvedFromIndex : 0);
+    if (Input->Expression == FromExpression)
+    {
+        return true;
+    }
+
+    OutErrorMessage = FString::Printf(
+        TEXT("Failed to connect '%s' -> '%s' input '%s' (display='%s', property='%s', index=%d)"),
+        *FromExpression->GetName(),
+        *ToExpression->GetName(),
+        *ToInputName,
+        *ResolvedToName,
+        *ResolvedPropertyName,
+        ResolvedToIndex);
+    return false;
+}
+
 TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::ExpressionToJson(UMaterialExpression* Expression) const
 {
     TSharedPtr<FJsonObject> JsonObject = MakeShared<FJsonObject>();
@@ -1371,6 +1838,9 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::ExpressionToJson(UMaterialEx
     PositionArray.Add(MakeJsonNumber(Expression->MaterialExpressionEditorX));
     PositionArray.Add(MakeJsonNumber(Expression->MaterialExpressionEditorY));
     JsonObject->SetArrayField(TEXT("position"), PositionArray);
+
+    JsonObject->SetArrayField(TEXT("inputs"), ExpressionInputsToJson(Expression));
+    JsonObject->SetArrayField(TEXT("outputs"), ExpressionOutputsToJson(Expression));
 
     return JsonObject;
 }
@@ -2053,9 +2523,35 @@ bool FUnrealMCPMaterialCommands::RebuildExpressionGraph(
                 ToObject->TryGetStringField(TEXT("input_name"), ToInputName);
             }
 
-            if (!UMaterialEditingLibrary::ConnectMaterialExpressions(FromExpression, FromOutputName, ToExpression, ToInputName))
+            int32 FromOutputIndex = INDEX_NONE;
+            if (FromObject->HasField(TEXT("output_index")))
             {
-                OutErrorMessage = FString::Printf(TEXT("Failed to connect expression %s to %s"), *FromExpression->GetName(), *ToExpression->GetName());
+                FromOutputIndex = static_cast<int32>(FromObject->GetNumberField(TEXT("output_index")));
+            }
+
+            int32 ToInputIndex = INDEX_NONE;
+            if (ToObject->HasField(TEXT("input_index")))
+            {
+                ToInputIndex = static_cast<int32>(ToObject->GetNumberField(TEXT("input_index")));
+            }
+            else if (ToObject->HasField(TEXT("to_input_index")))
+            {
+                ToInputIndex = static_cast<int32>(ToObject->GetNumberField(TEXT("to_input_index")));
+            }
+
+            FString ConnectError;
+            if (!TryConnectMaterialExpressionsResolved(
+                FromExpression,
+                FromOutputName,
+                FromOutputIndex,
+                ToExpression,
+                ToInputName,
+                ToInputIndex,
+                ConnectError))
+            {
+                OutErrorMessage = ConnectError.IsEmpty()
+                    ? FString::Printf(TEXT("Failed to connect expression %s to %s"), *FromExpression->GetName(), *ToExpression->GetName())
+                    : ConnectError;
                 return false;
             }
         }
@@ -2548,11 +3044,45 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleConnectMaterialExpress
     const FString FromOutputName = Params->HasField(TEXT("from_output_name")) ? Params->GetStringField(TEXT("from_output_name")) : TEXT("");
     const FString ToInputName = Params->HasField(TEXT("to_input_name")) ? Params->GetStringField(TEXT("to_input_name")) : TEXT("");
 
+    int32 FromOutputIndex = INDEX_NONE;
+    if (Params->HasField(TEXT("from_output_index")))
+    {
+        FromOutputIndex = static_cast<int32>(Params->GetNumberField(TEXT("from_output_index")));
+    }
+
+    int32 ToInputIndex = INDEX_NONE;
+    if (Params->HasField(TEXT("to_input_index")))
+    {
+        ToInputIndex = static_cast<int32>(Params->GetNumberField(TEXT("to_input_index")));
+    }
+
     Material->Modify();
 
-    if (!UMaterialEditingLibrary::ConnectMaterialExpressions(FromExpression, FromOutputName, ToExpression, ToInputName))
+    FString ConnectErrorMessage;
+    if (!TryConnectMaterialExpressionsResolved(
+        FromExpression,
+        FromOutputName,
+        FromOutputIndex,
+        ToExpression,
+        ToInputName,
+        ToInputIndex,
+        ConnectErrorMessage))
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to connect material expressions"));
+        TSharedPtr<FJsonObject> ErrorObject = FUnrealMCPCommonUtils::CreateErrorResponse(
+            ConnectErrorMessage.IsEmpty() ? TEXT("Failed to connect material expressions") : ConnectErrorMessage);
+        ErrorObject->SetArrayField(TEXT("available_inputs"), ExpressionInputsToJson(ToExpression));
+        ErrorObject->SetArrayField(TEXT("available_outputs"), ExpressionOutputsToJson(FromExpression));
+        ErrorObject->SetStringField(TEXT("requested_to_input_name"), ToInputName);
+        if (ToInputIndex >= 0)
+        {
+            ErrorObject->SetNumberField(TEXT("requested_to_input_index"), ToInputIndex);
+        }
+        ErrorObject->SetStringField(TEXT("requested_from_output_name"), FromOutputName);
+        if (FromOutputIndex >= 0)
+        {
+            ErrorObject->SetNumberField(TEXT("requested_from_output_index"), FromOutputIndex);
+        }
+        return ErrorObject;
     }
 
     const bool bDeferCompile = Params->HasField(TEXT("defer_compile")) ? Params->GetBoolField(TEXT("defer_compile")) : true;
@@ -2572,10 +3102,29 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleConnectMaterialExpress
         }
     }
 
+    // Resolve again for response metadata (cheap).
+    int32 ResolvedFromIndex = INDEX_NONE;
+    FString ResolvedFromName;
+    FString UnusedError;
+    ResolveExpressionOutput(FromExpression, FromOutputName, FromOutputIndex, ResolvedFromIndex, ResolvedFromName, UnusedError);
+
+    int32 ResolvedToIndex = INDEX_NONE;
+    FString ResolvedToName;
+    FString ResolvedPropertyName;
+    ResolveExpressionInput(ToExpression, ToInputName, ToInputIndex, ResolvedToIndex, ResolvedToName, ResolvedPropertyName, UnusedError);
+
     TSharedPtr<FJsonObject> ResponseObject = MakeShared<FJsonObject>();
     ResponseObject->SetStringField(TEXT("material_path"), AssetPath);
     ResponseObject->SetObjectField(TEXT("from_expression"), ExpressionToJson(FromExpression));
     ResponseObject->SetObjectField(TEXT("to_expression"), ExpressionToJson(ToExpression));
+    ResponseObject->SetStringField(TEXT("from_output_name"), ResolvedFromName);
+    ResponseObject->SetNumberField(TEXT("from_output_index"), ResolvedFromIndex);
+    ResponseObject->SetStringField(TEXT("to_input_name"), ResolvedToName);
+    ResponseObject->SetNumberField(TEXT("to_input_index"), ResolvedToIndex);
+    if (!ResolvedPropertyName.IsEmpty())
+    {
+        ResponseObject->SetStringField(TEXT("to_input_property_name"), ResolvedPropertyName);
+    }
     ResponseObject->SetBoolField(TEXT("defer_compile"), bDeferCompile);
     ResponseObject->SetBoolField(TEXT("defer_save"), bDeferSave);
 

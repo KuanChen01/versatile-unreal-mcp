@@ -52,6 +52,38 @@ private:
     bool TrySetMaterialShadingModel(UMaterial* Material, const FString& ShadingModelName, FString& OutErrorMessage) const;
     bool TryParseMaterialProperty(const FString& PropertyName, EMaterialProperty& OutProperty) const;
     TSharedPtr<FJsonObject> ExpressionToJson(UMaterialExpression* Expression) const;
+    TArray<TSharedPtr<FJsonValue>> ExpressionInputsToJson(UMaterialExpression* Expression) const;
+    TArray<TSharedPtr<FJsonValue>> ExpressionOutputsToJson(UMaterialExpression* Expression) const;
+    /**
+     * Resolve a material expression input by index and/or name.
+     * Matches display name (GetInputName), then reflected FExpressionInput property name
+     * (e.g. "Position" for DistanceToNearestSurface's dynamic world-position pin).
+     * On success, OutConnectName is the display name safe to pass to ConnectMaterialExpressions.
+     */
+    bool ResolveExpressionInput(
+        UMaterialExpression* Expression,
+        const FString& InputName,
+        int32 InputIndex,
+        int32& OutIndex,
+        FString& OutConnectName,
+        FString& OutPropertyName,
+        FString& OutErrorMessage) const;
+    /** Resolve output by index and/or name; OutConnectName is safe for ConnectMaterialExpressions. */
+    bool ResolveExpressionOutput(
+        UMaterialExpression* Expression,
+        const FString& OutputName,
+        int32 OutputIndex,
+        int32& OutIndex,
+        FString& OutConnectName,
+        FString& OutErrorMessage) const;
+    bool TryConnectMaterialExpressionsResolved(
+        UMaterialExpression* FromExpression,
+        const FString& FromOutputName,
+        int32 FromOutputIndex,
+        UMaterialExpression* ToExpression,
+        const FString& ToInputName,
+        int32 ToInputIndex,
+        FString& OutErrorMessage) const;
     TSharedPtr<FJsonObject> ValidateMaterialGraph(UMaterial* Material) const;
     TSharedPtr<FJsonObject> GetMaterialCompileStatus(UMaterial* Material) const;
     bool ApplyMaterialProperties(UMaterial* Material, const TSharedPtr<FJsonObject>& PropertiesObject, FString& OutErrorMessage) const;

@@ -200,6 +200,56 @@ def split_frame(data: bytes) -> tuple[Dict[str, Any], bytes]:
     return obj, data[total:]
 
 
+def is_transient_connection_error(exc: BaseException) -> bool:
+    """
+    True for connection aborts/resets that are session lifecycle noise, not framing mismatch.
+
+    Windows: 10053 (WSAECONNABORTED), 10054 (WSAECONNRESET), 10057 (not connected).
+    POSIX: ECONNRESET (104), EPIPE (32), ENOTCONN (107) — winerror/errno may both appear.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror in (10053, 10054, 10057, 10058):
+        return True
+    errno = getattr(exc, "errno", None)
+    if errno in (32, 104, 107, 110):  # EPIPE, ECONNRESET, ENOTCONN, ETIMEDOUT (varies)
+        return True
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "10053",
+            "10054",
+            "connection abort",
+            "connection reset",
+            "broken pipe",
+            "not connected",
+            "connection closed while reading",
+            "socket error while reading",
+            "socket error while writing",
+            "forcibly closed",
+        )
+    )
+
+
+# Backward-compatible private alias
+_is_transient_connection_error = is_transient_connection_error
+
+
+def is_retryable_transport_error(exc: BaseException) -> bool:
+    """True when a command should be retried on a fresh TCP session."""
+    if isinstance(exc, ProtocolError):
+        if exc.incompatible:
+            return False
+        return is_transient_connection_error(exc) or (
+            "connection closed" in str(exc).lower()
+            or "socket error" in str(exc).lower()
+            or "incomplete" in str(exc).lower()
+        )
+    if isinstance(exc, OSError):
+        return is_transient_connection_error(exc)
+    return False
+
+
 def recv_exact(sock: Any, num_bytes: int) -> bytes:
     """
     Read exactly ``num_bytes`` from a socket-like object with ``recv``.
@@ -227,13 +277,18 @@ def recv_exact(sock: Any, num_bytes: int) -> bytes:
                     f"timeout while reading {num_bytes} bytes ({len(chunks)} received)",
                     incompatible=False,
                 ) from exc
-            raise ProtocolError(f"socket error while reading: {exc}", incompatible=True) from exc
+            # Connection aborts are session noise (peer closed), not protocol mismatch.
+            raise ProtocolError(
+                f"socket error while reading: {exc}",
+                incompatible=not is_transient_connection_error(exc),
+            ) from exc
 
         if not chunk:
+            # Clean peer close mid-frame is a transport failure for this call, but
+            # not evidence of length-prefix protocol incompatibility.
             raise ProtocolError(
-                f"connection closed while reading {num_bytes} bytes ({len(chunks)} received). "
-                + PROTOCOL_INCOMPATIBLE_HINT,
-                incompatible=True,
+                f"connection closed while reading {num_bytes} bytes ({len(chunks)} received)",
+                incompatible=False,
             )
         chunks.extend(chunk)
     return bytes(chunks)
@@ -267,7 +322,13 @@ def recv_json_frame(sock: Any) -> Dict[str, Any]:
 def send_json_frame(sock: Any, obj: Mapping[str, Any]) -> None:
     """Write one length-prefixed JSON frame to ``sock``."""
     frame = encode_json_frame(obj)
-    sock.sendall(frame)
+    try:
+        sock.sendall(frame)
+    except OSError as exc:
+        raise ProtocolError(
+            f"socket error while writing: {exc}",
+            incompatible=not is_transient_connection_error(exc),
+        ) from exc
 
 
 def build_command(

@@ -54,11 +54,21 @@ bool FMCPServerRunnable::Init()
 	return true;
 }
 
-bool FMCPServerRunnable::RecvExact(FSocket* Socket, uint8* Dest, int32 NumBytes, double TimeoutSeconds) const
+FMCPServerRunnable::ERecvExactResult FMCPServerRunnable::RecvExact(
+	FSocket* Socket,
+	uint8* Dest,
+	int32 NumBytes,
+	double TimeoutSeconds,
+	int32* OutBytesRead) const
 {
+	if (OutBytesRead)
+	{
+		*OutBytesRead = 0;
+	}
+
 	if (!Socket || !Dest || NumBytes <= 0)
 	{
-		return false;
+		return ERecvExactResult::SocketError;
 	}
 
 	int32 TotalRead = 0;
@@ -71,8 +81,12 @@ bool FMCPServerRunnable::RecvExact(FSocket* Socket, uint8* Dest, int32 NumBytes,
 		{
 			if (BytesRead == 0)
 			{
-				UE_LOG(LogUnrealMCPServer, Warning, TEXT("MCPServerRunnable: Connection closed during RecvExact (%d/%d)"), TotalRead, NumBytes);
-				return false;
+				// Peer closed the connection.
+				if (OutBytesRead)
+				{
+					*OutBytesRead = TotalRead;
+				}
+				return TotalRead == 0 ? ERecvExactResult::PeerClosed : ERecvExactResult::PartialClose;
 			}
 			TotalRead += BytesRead;
 			continue;
@@ -83,18 +97,37 @@ bool FMCPServerRunnable::RecvExact(FSocket* Socket, uint8* Dest, int32 NumBytes,
 		{
 			if ((FPlatformTime::Seconds() - StartTime) > TimeoutSeconds)
 			{
-				UE_LOG(LogUnrealMCPServer, Warning, TEXT("MCPServerRunnable: RecvExact timed out (%d/%d)"), TotalRead, NumBytes);
-				return false;
+				if (OutBytesRead)
+				{
+					*OutBytesRead = TotalRead;
+				}
+				return ERecvExactResult::Timeout;
 			}
 			FPlatformProcess::Sleep(0.001f);
 			continue;
 		}
 
-		UE_LOG(LogUnrealMCPServer, Warning, TEXT("MCPServerRunnable: RecvExact failed error=%d (%d/%d)"), LastError, TotalRead, NumBytes);
-		return false;
+		UE_LOG(LogUnrealMCPServer, Warning,
+			TEXT("MCPServerRunnable: RecvExact failed error=%d (%d/%d)"),
+			LastError, TotalRead, NumBytes);
+		if (OutBytesRead)
+		{
+			*OutBytesRead = TotalRead;
+		}
+		return ERecvExactResult::SocketError;
 	}
 
-	return TotalRead == NumBytes;
+	if (OutBytesRead)
+	{
+		*OutBytesRead = TotalRead;
+	}
+
+	if (!bRunning && TotalRead < NumBytes)
+	{
+		return ERecvExactResult::Aborted;
+	}
+
+	return TotalRead == NumBytes ? ERecvExactResult::Ok : ERecvExactResult::Aborted;
 }
 
 bool FMCPServerRunnable::SendExact(FSocket* Socket, const uint8* Source, int32 NumBytes, double TimeoutSeconds) const
@@ -140,18 +173,58 @@ bool FMCPServerRunnable::SendExact(FSocket* Socket, const uint8* Source, int32 N
 	return TotalSent == NumBytes;
 }
 
-bool FMCPServerRunnable::RecvFrame(FSocket* Socket, TArray<uint8>& OutPayload, double TimeoutSeconds) const
+bool FMCPServerRunnable::RecvFrame(
+	FSocket* Socket,
+	TArray<uint8>& OutPayload,
+	double TimeoutSeconds,
+	ERecvExactResult* OutResult) const
 {
 	uint8 Header[4];
-	if (!RecvExact(Socket, Header, 4, TimeoutSeconds))
+	int32 HeaderBytes = 0;
+	const ERecvExactResult HeaderResult = RecvExact(Socket, Header, 4, TimeoutSeconds, &HeaderBytes);
+	if (OutResult)
 	{
-		UE_LOG(LogUnrealMCPServer, Warning, TEXT("MCPServerRunnable: Failed to read frame header. %s"), ProtocolIncompatibleHint);
+		*OutResult = HeaderResult;
+	}
+
+	if (HeaderResult != ERecvExactResult::Ok)
+	{
+		switch (HeaderResult)
+		{
+		case ERecvExactResult::PeerClosed:
+			// Normal one-shot client lifecycle: connect → one command → close.
+			UE_LOG(LogUnrealMCPServer, Verbose, TEXT("MCPServerRunnable: Client closed connection (clean EOF before next frame)"));
+			break;
+		case ERecvExactResult::Timeout:
+			// Idle session end after serving request(s). Expected with one-shot clients.
+			UE_LOG(LogUnrealMCPServer, Verbose, TEXT("MCPServerRunnable: Client idle timeout waiting for next frame header"));
+			break;
+		case ERecvExactResult::PartialClose:
+			UE_LOG(LogUnrealMCPServer, Warning,
+				TEXT("MCPServerRunnable: Connection closed mid frame header (%d/4 bytes). %s"),
+				HeaderBytes, ProtocolIncompatibleHint);
+			break;
+		case ERecvExactResult::SocketError:
+			UE_LOG(LogUnrealMCPServer, Warning,
+				TEXT("MCPServerRunnable: Socket error reading frame header. %s"),
+				ProtocolIncompatibleHint);
+			break;
+		case ERecvExactResult::Aborted:
+			UE_LOG(LogUnrealMCPServer, Display, TEXT("MCPServerRunnable: RecvFrame aborted (server stopping)"));
+			break;
+		default:
+			break;
+		}
 		return false;
 	}
 
 	const uint32 Length = ReadLittleEndianUInt32(Header);
 	if (Length == 0 || Length > MaxPayloadBytes)
 	{
+		if (OutResult)
+		{
+			*OutResult = ERecvExactResult::SocketError;
+		}
 		UE_LOG(LogUnrealMCPServer, Error,
 			TEXT("MCPServerRunnable: Invalid payload length %u (max %u). %s"),
 			Length, MaxPayloadBytes, ProtocolIncompatibleHint);
@@ -159,9 +232,18 @@ bool FMCPServerRunnable::RecvFrame(FSocket* Socket, TArray<uint8>& OutPayload, d
 	}
 
 	OutPayload.SetNumUninitialized((int32)Length);
-	if (!RecvExact(Socket, OutPayload.GetData(), (int32)Length, TimeoutSeconds))
+	int32 PayloadBytes = 0;
+	const ERecvExactResult PayloadResult = RecvExact(Socket, OutPayload.GetData(), (int32)Length, TimeoutSeconds, &PayloadBytes);
+	if (OutResult)
 	{
-		UE_LOG(LogUnrealMCPServer, Warning, TEXT("MCPServerRunnable: Failed to read frame payload (%u bytes)"), Length);
+		*OutResult = PayloadResult;
+	}
+
+	if (PayloadResult != ERecvExactResult::Ok)
+	{
+		UE_LOG(LogUnrealMCPServer, Warning,
+			TEXT("MCPServerRunnable: Failed to read frame payload (%d/%u bytes, result=%d)"),
+			PayloadBytes, Length, static_cast<int32>(PayloadResult));
 		return false;
 	}
 
@@ -288,7 +370,8 @@ uint32 FMCPServerRunnable::Run()
 				// Serve framed requests until the client disconnects or goes idle.
 				// Always call RecvFrame (do not gate on HasPendingData alone) — abandoned
 				// CLOSE_WAIT clients otherwise spin forever and block Accept() for new MCP calls.
-				constexpr double ClientIdleTimeoutSeconds = 5.0;
+				// Idle timeout is longer so a session-reusing Python client can space out tools.
+				constexpr double ClientIdleTimeoutSeconds = 30.0;
 				while (bRunning && ClientSocket.IsValid())
 				{
 					if (ClientSocket->GetConnectionState() != SCS_Connected)
@@ -298,9 +381,19 @@ uint32 FMCPServerRunnable::Run()
 					}
 
 					TArray<uint8> Payload;
-					if (!RecvFrame(ClientSocket.Get(), Payload, ClientIdleTimeoutSeconds))
+					ERecvExactResult RecvResult = ERecvExactResult::Ok;
+					if (!RecvFrame(ClientSocket.Get(), Payload, ClientIdleTimeoutSeconds, &RecvResult))
 					{
-						// Timeout, framing failure, or remote close — end this client session.
+						// Clean peer close / idle timeout end the session quietly.
+						// Partial/socket framing issues already logged inside RecvFrame.
+						if (RecvResult == ERecvExactResult::PeerClosed)
+						{
+							UE_LOG(LogUnrealMCPServer, Verbose, TEXT("MCPServerRunnable: Ending client session after clean disconnect"));
+						}
+						else if (RecvResult == ERecvExactResult::Timeout)
+						{
+							UE_LOG(LogUnrealMCPServer, Verbose, TEXT("MCPServerRunnable: Ending client session after idle timeout"));
+						}
 						break;
 					}
 
@@ -312,6 +405,10 @@ uint32 FMCPServerRunnable::Run()
 					ClientSocket->Close();
 					ClientSocket.Reset();
 				}
+
+				// After a session ends, immediately check for the next pending client
+				// instead of sleeping — reduces races when agents reconnect quickly.
+				continue;
 			}
 			else
 			{
@@ -319,7 +416,7 @@ uint32 FMCPServerRunnable::Run()
 			}
 		}
 
-		FPlatformProcess::Sleep(0.1f);
+		FPlatformProcess::Sleep(0.01f);
 	}
 
 	UE_LOG(LogUnrealMCPServer, Display, TEXT("MCPServerRunnable: Server thread stopping"));

@@ -72,7 +72,7 @@ namespace
 
     // Bump when command handlers change in a way agents must detect after hot-reload/copy drift.
     // Surfaced on get_bridge_status as plugin.handler_build.
-    const FString UnrealMCPHandlerBuild = TEXT("2026-07-25.6");
+    const FString UnrealMCPHandlerBuild = TEXT("2026-08-11.2");
 
     const TArray<FString>& GetEditorCommandTypes()
     {

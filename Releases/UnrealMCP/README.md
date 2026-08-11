@@ -21,7 +21,7 @@ Checksums: see `SHA256SUMS.txt`.
 
 ## Package contents (this refresh)
 
-Includes plugin features as of **2026-07-16** (HEAD including request_id metrics):
+Includes plugin features as of **2026-08-11** (`handler_build` **2026-08-11.2** on UE 5.7 package):
 
 - Protocol 2.0 framing + hard handshake surface
 - P1 tools: `find_assets`, `get_asset_info`, `delete_asset`, `spawn_actor_by_class`, `assign_material_to_actor`
@@ -31,6 +31,9 @@ Includes plugin features as of **2026-07-16** (HEAD including request_id metrics
 - **Delete:** `EditorDestroyActor`
 - **Properties:** `FVector` / `FRotator` component property writes
 - **Correlation:** wire `request_id` + plugin `duration_ms` echo for multi-step debugging
+- **Half-transaction / undo:** `begin_transaction` / `end_transaction` / `cancel_transaction` / undo-redo
+- **Material pin resolve (5.7):** `connect_material_expressions` accepts `to_input_index` / `from_output_index` and reflected `FExpressionInput` property names (e.g. `Position` on DistanceToNearestSurface when the display name is dynamic World Position); expression JSON includes `inputs[]` / `outputs[]`
+- **Transport:** clean client disconnect no longer logged as protocol-incompatible framing; session-friendly accept/idle; pair with Python session reuse + transient retry (10053/10054)
 
 ## Manual install
 
@@ -58,7 +61,14 @@ Default listen: `127.0.0.1:55557`.
 uv --directory <repo>\Python run python -c "from bridge_client import run_bridge_command; print(run_bridge_command('get_bridge_status'))"
 ```
 
-Expect `protocol_version: "2.0"` and `success: true`. Tool responses include `meta.request_id` and timing fields when using a matching Python server.
+Expect `protocol_version: "2.0"` and `success: true`. On a matching Python server, check:
+
+```text
+plugin.handler_build == "2026-08-11.2"   # after installing the refreshed UE_5.7 zip
+handler_build_mismatch == false
+```
+
+Tool responses include `meta.request_id` and timing fields when using a matching Python server.
 
 ## Rebuild notes
 
@@ -66,4 +76,7 @@ Packages produced with Epic `RunUAT BuildPlugin` from `MCPGameProject/Plugins/Un
 
 Zip root: `UnrealMCP/` (`Binaries/Win64` + `Source` + `.uplugin`).
 
-Last refreshed: **2026-07-16** (request_id + metrics + prior P1/graph/safety stack).
+- **UE 5.5 / 5.6 zips:** last full matrix rebuild **2026-07-16** (still usable for protocol 2.0; do not claim 2026-08-11 pin/transport stamps unless rebuilt).
+- **UE 5.7 zip:** refreshed **2026-08-11** with material pin resolution + transport logging/session fixes (`handler_build` 2026-08-11.2).
+
+Last refreshed: **2026-08-11** (UE 5.7 package + Python transport reuse/retry; 5.5/5.6 zips unchanged from 2026-07-16).

@@ -114,12 +114,23 @@ def register_material_tools(mcp: FastMCP):
         to_expression: str,
         from_output_name: str = "",
         to_input_name: str = "",
+        from_output_index: Optional[int] = None,
+        to_input_index: Optional[int] = None,
         source_ref: Optional[Dict[str, Any]] = None,
         target_ref: Optional[Dict[str, Any]] = None,
         defer_compile: bool = True,
         defer_save: bool = True
     ) -> Dict[str, Any]:
-        """Connect two material expressions."""
+        """
+        Connect two material expressions.
+
+        Pin resolution (UE 5.7+):
+        - Prefer ``to_input_index`` when known.
+        - ``to_input_name`` matches display name, then reflected property name
+          (e.g. ``Position`` on DistanceToNearestSurface even when the editor
+          pin label is a dynamic world-position string), then soft contains.
+        - On failure the plugin returns ``available_inputs`` / ``available_outputs``.
+        """
         params: Dict[str, Any] = {
             "material_path": material_path,
             "defer_compile": defer_compile,
@@ -139,6 +150,10 @@ def register_material_tools(mcp: FastMCP):
             params["from_output_name"] = from_output_name
         if to_input_name:
             params["to_input_name"] = to_input_name
+        if from_output_index is not None:
+            params["from_output_index"] = int(from_output_index)
+        if to_input_index is not None:
+            params["to_input_index"] = int(to_input_index)
 
         return _send_material_command("connect_material_expressions", params)
 

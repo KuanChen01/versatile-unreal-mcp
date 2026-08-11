@@ -25,14 +25,33 @@ public:
 	virtual void Exit() override;
 
 protected:
+	/** Outcome of a timed exact socket read (used to avoid false protocol-mismatch logs). */
+	enum class ERecvExactResult : uint8
+	{
+		Ok = 0,
+		/** Peer closed cleanly before any bytes of this read were received (normal one-shot end). */
+		PeerClosed,
+		/** Peer closed after a partial read (real framing/session problem). */
+		PartialClose,
+		/** Idle timeout with no progress. */
+		Timeout,
+		/** Non-recoverable socket error. */
+		SocketError,
+		/** Server thread is stopping. */
+		Aborted
+	};
+
 	/** Read exactly NumBytes into Dest, respecting non-blocking sockets and timeout. */
-	bool RecvExact(FSocket* Socket, uint8* Dest, int32 NumBytes, double TimeoutSeconds) const;
+	ERecvExactResult RecvExact(FSocket* Socket, uint8* Dest, int32 NumBytes, double TimeoutSeconds, int32* OutBytesRead = nullptr) const;
 
 	/** Write exactly NumBytes from Source. */
 	bool SendExact(FSocket* Socket, const uint8* Source, int32 NumBytes, double TimeoutSeconds) const;
 
-	/** Read one length-prefixed UTF-8 JSON payload into OutPayload. */
-	bool RecvFrame(FSocket* Socket, TArray<uint8>& OutPayload, double TimeoutSeconds) const;
+	/**
+	 * Read one length-prefixed UTF-8 JSON payload into OutPayload.
+	 * OutResult receives the detailed recv outcome (optional).
+	 */
+	bool RecvFrame(FSocket* Socket, TArray<uint8>& OutPayload, double TimeoutSeconds, ERecvExactResult* OutResult = nullptr) const;
 
 	/** Send one length-prefixed UTF-8 JSON payload. */
 	bool SendFrame(FSocket* Socket, const TArray<uint8>& Payload, double TimeoutSeconds) const;

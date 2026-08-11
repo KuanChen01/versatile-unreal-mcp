@@ -6,6 +6,9 @@ A simple MCP server for interacting with Unreal Engine.
 
 import logging
 import socket
+import struct
+import threading
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, Optional
 
@@ -19,6 +22,7 @@ from bridge_protocol import (
     extract_remote_protocol_version,
     format_protocol_mismatch_message,
     is_protocol_compatible,
+    is_retryable_transport_error,
     recv_json_frame,
     send_json_frame,
     timeout_for_command,
@@ -48,15 +52,25 @@ try:
 except ValueError:
     UNREAL_PORT = 55557
 CONNECT_TIMEOUT = 5.0
+# One reconnect+retry after WinError 10053 / reset / mid-frame close.
+TRANSPORT_MAX_ATTEMPTS = 3
+TRANSPORT_RETRY_BACKOFF_SEC = 0.05
 
 
 class UnrealConnection:
-    """Connection helper for one-shot framed commands to Unreal Engine."""
+    """
+    Framed bridge client for UnrealMCP.
+
+    Reuses a single TCP session across commands (plugin already serves multiple
+    frames per accept). On transient socket aborts (WinError 10053/10054),
+    reconnects and retries the command up to TRANSPORT_MAX_ATTEMPTS times.
+    """
 
     def __init__(self):
         self.socket: Optional[socket.socket] = None
         self.connected = False
         self.remote_protocol_version: Optional[str] = None
+        self._lock = threading.RLock()
 
     def connect(self, timeout: float = CONNECT_TIMEOUT) -> bool:
         """Open a TCP connection to the UnrealMCP plugin bridge."""
@@ -75,6 +89,11 @@ class UnrealConnection:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
+            # Brief graceful linger so FIN can leave before RST on close.
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 1))
+            except OSError:
+                pass
             sock.connect((UNREAL_HOST, UNREAL_PORT))
 
             self.socket = sock
@@ -87,14 +106,71 @@ class UnrealConnection:
             return False
 
     def disconnect(self) -> None:
-        """Close the current socket if open."""
+        """Close the current socket if open (graceful half-close when possible)."""
         if self.socket is not None:
+            try:
+                # Prefer write-half shutdown so the plugin sees a clean peer close
+                # while any residual FIN/ACK can still complete.
+                self.socket.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
             try:
                 self.socket.close()
             except OSError:
                 pass
         self.socket = None
         self.connected = False
+
+    def _ensure_connected(self, timeout: float) -> bool:
+        if self.connected and self.socket is not None:
+            return True
+        return self.connect(timeout=timeout)
+
+    def _round_trip(
+        self,
+        command: str,
+        params: Optional[Dict[str, Any]],
+        *,
+        command_timeout: float,
+        request_id: Optional[str],
+    ) -> Dict[str, Any]:
+        assert self.socket is not None
+        self.socket.settimeout(command_timeout)
+
+        request = build_command(command, params, request_id=request_id)
+        logger.info(
+            "Sending command type=%s request_id=%s timeout=%.1fs protocol=%s session=%s",
+            command,
+            request_id,
+            command_timeout,
+            PROTOCOL_VERSION,
+            "reuse" if self.connected else "new",
+        )
+        logger.debug("Command payload: %s", request)
+        send_json_frame(self.socket, request)
+
+        response = recv_json_frame(self.socket)
+        logger.info(
+            "Complete response from Unreal for %s request_id=%s",
+            command,
+            request_id or (response.get("request_id") if isinstance(response, dict) else None),
+        )
+        logger.debug("Response payload: %s", response)
+
+        if response.get("status") == "error":
+            error_message = response.get("error") or response.get("message", "Unknown Unreal error")
+            logger.error("Unreal error (status=error): %s", error_message)
+            if "error" not in response:
+                response["error"] = error_message
+        elif response.get("success") is False:
+            error_message = response.get("error") or response.get("message", "Unknown Unreal error")
+            logger.error("Unreal error (success=false): %s", error_message)
+            response = {
+                "status": "error",
+                "error": error_message,
+            }
+
+        return response
 
     def send_command(
         self,
@@ -107,85 +183,111 @@ class UnrealConnection:
         """
         Send a command to Unreal Engine and return the parsed JSON response.
 
-        Uses protocol 2.0 length-prefixed frames. Each call reconnects (one-shot),
-        matching the plugin's accept-and-serve style for Step 1.
+        Uses protocol 2.0 length-prefixed frames. Keeps the TCP session open for
+        subsequent commands. Retries on transient transport errors (e.g. WinError
+        10053) by reconnecting.
         """
-        # Always reconnect for each command (plugin currently treats sessions as short-lived).
-        self.disconnect()
-
         command_timeout = timeout if timeout is not None else timeout_for_command(command)
-        if not self.connect(timeout=min(CONNECT_TIMEOUT, command_timeout)):
-            logger.error(
-                "Failed to connect to Unreal Engine for command %s request_id=%s",
-                command,
-                request_id,
-            )
-            return None
+        connect_timeout = min(CONNECT_TIMEOUT, command_timeout)
+        last_exc: Optional[BaseException] = None
 
-        assert self.socket is not None
-        try:
-            self.socket.settimeout(command_timeout)
+        with self._lock:
+            for attempt in range(1, TRANSPORT_MAX_ATTEMPTS + 1):
+                try:
+                    if not self._ensure_connected(connect_timeout):
+                        logger.error(
+                            "Failed to connect to Unreal Engine for command %s "
+                            "request_id=%s attempt=%s",
+                            command,
+                            request_id,
+                            attempt,
+                        )
+                        # Connect failure: brief backoff then retry.
+                        if attempt < TRANSPORT_MAX_ATTEMPTS:
+                            time.sleep(TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                            continue
+                        return None
 
-            request = build_command(command, params, request_id=request_id)
-            logger.info(
-                "Sending command type=%s request_id=%s timeout=%.1fs protocol=%s",
-                command,
-                request_id,
-                command_timeout,
-                PROTOCOL_VERSION,
-            )
-            logger.debug("Command payload: %s", request)
-            send_json_frame(self.socket, request)
+                    return self._round_trip(
+                        command,
+                        params,
+                        command_timeout=command_timeout,
+                        request_id=request_id,
+                    )
+                except ProtocolError as exc:
+                    last_exc = exc
+                    logger.error(
+                        "Protocol error for %s attempt=%s: %s",
+                        command,
+                        attempt,
+                        exc,
+                    )
+                    self.disconnect()
+                    if exc.incompatible or not is_retryable_transport_error(exc):
+                        message = str(exc)
+                        if exc.incompatible:
+                            message = f"{message} ({PROTOCOL_INCOMPATIBLE_HINT})"
+                        return {
+                            "status": "error",
+                            "error": message,
+                            "protocol_version": PROTOCOL_VERSION,
+                            "protocol_incompatible": bool(exc.incompatible),
+                        }
+                    if attempt < TRANSPORT_MAX_ATTEMPTS:
+                        logger.warning(
+                            "Retrying %s after transient transport error (attempt %s/%s): %s",
+                            command,
+                            attempt,
+                            TRANSPORT_MAX_ATTEMPTS,
+                            exc,
+                        )
+                        time.sleep(TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                        continue
+                    return {
+                        "status": "error",
+                        "error": str(exc),
+                        "protocol_version": PROTOCOL_VERSION,
+                        "protocol_incompatible": False,
+                        "transport_retries": attempt,
+                    }
+                except OSError as exc:
+                    last_exc = exc
+                    logger.error(
+                        "Socket error sending command %s attempt=%s: %s",
+                        command,
+                        attempt,
+                        exc,
+                    )
+                    self.disconnect()
+                    if not is_retryable_transport_error(exc) or attempt >= TRANSPORT_MAX_ATTEMPTS:
+                        return {
+                            "status": "error",
+                            "error": str(exc),
+                            "protocol_version": PROTOCOL_VERSION,
+                            "transport_retries": attempt,
+                        }
+                    logger.warning(
+                        "Retrying %s after OSError (attempt %s/%s): %s",
+                        command,
+                        attempt,
+                        TRANSPORT_MAX_ATTEMPTS,
+                        exc,
+                    )
+                    time.sleep(TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                except Exception as exc:  # noqa: BLE001 — surface unexpected errors to tools
+                    logger.error("Error sending command %s: %s", command, exc)
+                    self.disconnect()
+                    return {
+                        "status": "error",
+                        "error": str(exc),
+                        "protocol_version": PROTOCOL_VERSION,
+                    }
 
-            response = recv_json_frame(self.socket)
-            logger.info(
-                "Complete response from Unreal for %s request_id=%s",
-                command,
-                request_id or (response.get("request_id") if isinstance(response, dict) else None),
-            )
-            logger.debug("Response payload: %s", response)
-
-            if response.get("status") == "error":
-                error_message = response.get("error") or response.get("message", "Unknown Unreal error")
-                logger.error("Unreal error (status=error): %s", error_message)
-                if "error" not in response:
-                    response["error"] = error_message
-            elif response.get("success") is False:
-                error_message = response.get("error") or response.get("message", "Unknown Unreal error")
-                logger.error("Unreal error (success=false): %s", error_message)
-                response = {
-                    "status": "error",
-                    "error": error_message,
-                }
-
-            return response
-        except ProtocolError as exc:
-            logger.error("Protocol error for %s: %s", command, exc)
-            message = str(exc)
-            if exc.incompatible:
-                message = f"{message} ({PROTOCOL_INCOMPATIBLE_HINT})"
-            return {
-                "status": "error",
-                "error": message,
-                "protocol_version": PROTOCOL_VERSION,
-                "protocol_incompatible": bool(exc.incompatible),
-            }
-        except OSError as exc:
-            logger.error("Socket error sending command %s: %s", command, exc)
-            return {
-                "status": "error",
-                "error": str(exc),
-                "protocol_version": PROTOCOL_VERSION,
-            }
-        except Exception as exc:  # noqa: BLE001 — surface unexpected errors to tools
-            logger.error("Error sending command %s: %s", command, exc)
-            return {
-                "status": "error",
-                "error": str(exc),
-                "protocol_version": PROTOCOL_VERSION,
-            }
-        finally:
-            self.disconnect()
+        return {
+            "status": "error",
+            "error": str(last_exc) if last_exc else "Transport failed after retries",
+            "protocol_version": PROTOCOL_VERSION,
+        }
 
     def ping(self) -> bool:
         """Return True if a framed ping round-trip succeeds (no version gate)."""
@@ -286,8 +388,8 @@ def get_unreal_connection() -> Optional[UnrealConnection]:
 
     On first use (or after a previous failure cleared the cache), health is
     verified with a framed ``ping`` **and** a hard protocol version check.
-    Subsequent tool calls reuse the helper without an extra ping round-trip;
-    each ``send_command`` still opens its own short-lived TCP session.
+    Subsequent tool calls reuse the helper and its TCP session (with automatic
+    reconnect/retry on transient socket aborts).
     """
     global _unreal_connection, _last_connect_error, _remote_protocol_version
     try:
