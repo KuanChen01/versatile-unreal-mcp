@@ -20,6 +20,10 @@ from typing import Any, Dict, Mapping, Optional, Set
 # Must match UnrealMCPBridge.cpp UnrealMCPProtocolVersion
 PROTOCOL_VERSION = "2.0"
 
+# Must match UnrealMCPBridge.cpp UnrealMCPHandlerBuild — bump both together.
+# Used by get_bridge_status / editor_preflight / resources to set handler_build_mismatch.
+EXPECTED_HANDLER_BUILD = "2026-09-23.1"
+
 # 4-byte little-endian length prefix
 HEADER_STRUCT = struct.Struct("<I")
 HEADER_SIZE = HEADER_STRUCT.size

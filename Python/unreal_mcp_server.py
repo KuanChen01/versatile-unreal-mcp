@@ -6,13 +6,15 @@ A simple MCP server for interacting with Unreal Engine.
 
 import logging
 import socket
-import struct
 import threading
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, Optional
 
+import anyio
 from mcp.server.fastmcp import FastMCP
+
+from stdio_compat import run_fastmcp_stdio
 
 from bridge_protocol import (
     PROTOCOL_INCOMPATIBLE_HINT,
@@ -52,18 +54,36 @@ try:
 except ValueError:
     UNREAL_PORT = 55557
 CONNECT_TIMEOUT = 5.0
-# One reconnect+retry after WinError 10053 / reset / mid-frame close.
-TRANSPORT_MAX_ATTEMPTS = 3
-TRANSPORT_RETRY_BACKOFF_SEC = 0.05
+# Reconnect+retry after WinError 10053 / reset / mid-frame close.
+TRANSPORT_MAX_ATTEMPTS = 8
+# Base backoff; multiplies by attempt. Must cover multi-agent Accept contention
+# (another MCP host may hold the bridge idle for a short poll window).
+TRANSPORT_RETRY_BACKOFF_SEC = 0.2
+# Session reuse is opt-in. Default is one-shot TCP per command:
+# connect → frame → response → close. This matches real agent tool gaps and
+# avoids WinError 10053 on half-open sockets when an older plugin ends the
+# session after each response. Set UNREAL_MCP_SESSION_REUSE=1 after loading
+# handler_build >= 2026-09-23.1 to enable multi-request TCP sessions.
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = _os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+SESSION_REUSE_ENABLED = _env_flag("UNREAL_MCP_SESSION_REUSE", default=False)
+# Only used when SESSION_REUSE_ENABLED: proactive reconnect after idle.
+SESSION_MAX_IDLE_SEC = float(_os.environ.get("UNREAL_MCP_SESSION_MAX_IDLE_SEC", "30") or "30")
 
 
 class UnrealConnection:
     """
     Framed bridge client for UnrealMCP.
 
-    Reuses a single TCP session across commands (plugin already serves multiple
-    frames per accept). On transient socket aborts (WinError 10053/10054),
-    reconnects and retries the command up to TRANSPORT_MAX_ATTEMPTS times.
+    Default: one-shot TCP per command (reliable under agent think-gaps).
+    Optional session reuse via UNREAL_MCP_SESSION_REUSE=1 (needs plugin that
+    keeps the accepted socket open for multiple frames). Retries transient
+    WinError 10053/10054 with exponential backoff.
     """
 
     def __init__(self):
@@ -71,6 +91,8 @@ class UnrealConnection:
         self.connected = False
         self.remote_protocol_version: Optional[str] = None
         self._lock = threading.RLock()
+        self._last_success_at: float = 0.0
+        self._session_requests: int = 0
 
     def connect(self, timeout: float = CONNECT_TIMEOUT) -> bool:
         """Open a TCP connection to the UnrealMCP plugin bridge."""
@@ -89,15 +111,13 @@ class UnrealConnection:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
-            # Brief graceful linger so FIN can leave before RST on close.
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 1))
-            except OSError:
-                pass
+            # Do NOT set SO_LINGER(on). On Windows linger is two u_shorts; packing
+            # two ints is wrong and linger-on can RST mid-retry storms.
             sock.connect((UNREAL_HOST, UNREAL_PORT))
 
             self.socket = sock
             self.connected = True
+            self._session_requests = 0
             logger.info("Connected to Unreal Engine")
             return True
         except OSError as exc:
@@ -120,9 +140,19 @@ class UnrealConnection:
                 pass
         self.socket = None
         self.connected = False
+        self._session_requests = 0
+
+    def _session_is_reusable(self) -> bool:
+        if not SESSION_REUSE_ENABLED:
+            return False
+        if not (self.connected and self.socket is not None):
+            return False
+        if self._last_success_at <= 0:
+            return True
+        return (time.monotonic() - self._last_success_at) <= SESSION_MAX_IDLE_SEC
 
     def _ensure_connected(self, timeout: float) -> bool:
-        if self.connected and self.socket is not None:
+        if self._session_is_reusable():
             return True
         return self.connect(timeout=timeout)
 
@@ -133,23 +163,27 @@ class UnrealConnection:
         *,
         command_timeout: float,
         request_id: Optional[str],
+        session_mode: str,
     ) -> Dict[str, Any]:
         assert self.socket is not None
         self.socket.settimeout(command_timeout)
 
         request = build_command(command, params, request_id=request_id)
         logger.info(
-            "Sending command type=%s request_id=%s timeout=%.1fs protocol=%s session=%s",
+            "Sending command type=%s request_id=%s timeout=%.1fs protocol=%s session=%s n=%s",
             command,
             request_id,
             command_timeout,
             PROTOCOL_VERSION,
-            "reuse" if self.connected else "new",
+            session_mode,
+            self._session_requests + 1,
         )
         logger.debug("Command payload: %s", request)
         send_json_frame(self.socket, request)
 
         response = recv_json_frame(self.socket)
+        self._session_requests += 1
+        self._last_success_at = time.monotonic()
         logger.info(
             "Complete response from Unreal for %s request_id=%s",
             command,
@@ -183,9 +217,9 @@ class UnrealConnection:
         """
         Send a command to Unreal Engine and return the parsed JSON response.
 
-        Uses protocol 2.0 length-prefixed frames. Keeps the TCP session open for
-        subsequent commands. Retries on transient transport errors (e.g. WinError
-        10053) by reconnecting.
+        Default one-shot TCP (connect per command). Retries transient transport
+        errors (e.g. WinError 10053) with exponential backoff. Optional session
+        reuse via UNREAL_MCP_SESSION_REUSE=1.
         """
         command_timeout = timeout if timeout is not None else timeout_for_command(command)
         connect_timeout = min(CONNECT_TIMEOUT, command_timeout)
@@ -194,6 +228,7 @@ class UnrealConnection:
         with self._lock:
             for attempt in range(1, TRANSPORT_MAX_ATTEMPTS + 1):
                 try:
+                    was_reusable = self._session_is_reusable()
                     if not self._ensure_connected(connect_timeout):
                         logger.error(
                             "Failed to connect to Unreal Engine for command %s "
@@ -202,18 +237,25 @@ class UnrealConnection:
                             request_id,
                             attempt,
                         )
-                        # Connect failure: brief backoff then retry.
                         if attempt < TRANSPORT_MAX_ATTEMPTS:
-                            time.sleep(TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                            # Cap backoff so multi-agent waits stay bounded.
+                            time.sleep(min(1.5, TRANSPORT_RETRY_BACKOFF_SEC * attempt))
                             continue
                         return None
 
-                    return self._round_trip(
+                    session_mode = "reuse" if was_reusable else "new"
+                    response = self._round_trip(
                         command,
                         params,
                         command_timeout=command_timeout,
                         request_id=request_id,
+                        session_mode=session_mode,
                     )
+                    # One-shot: release the socket so the plugin Accept loop is free
+                    # for the next agent tool call (and other MCP clients).
+                    if not SESSION_REUSE_ENABLED:
+                        self.disconnect()
+                    return response
                 except ProtocolError as exc:
                     last_exc = exc
                     logger.error(
@@ -234,14 +276,17 @@ class UnrealConnection:
                             "protocol_incompatible": bool(exc.incompatible),
                         }
                     if attempt < TRANSPORT_MAX_ATTEMPTS:
+                        backoff = min(1.5, TRANSPORT_RETRY_BACKOFF_SEC * attempt)
                         logger.warning(
-                            "Retrying %s after transient transport error (attempt %s/%s): %s",
+                            "Retrying %s after transient transport error "
+                            "(attempt %s/%s backoff=%.2fs): %s",
                             command,
                             attempt,
                             TRANSPORT_MAX_ATTEMPTS,
+                            backoff,
                             exc,
                         )
-                        time.sleep(TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                        time.sleep(backoff)
                         continue
                     return {
                         "status": "error",
@@ -266,14 +311,16 @@ class UnrealConnection:
                             "protocol_version": PROTOCOL_VERSION,
                             "transport_retries": attempt,
                         }
+                    backoff = min(1.5, TRANSPORT_RETRY_BACKOFF_SEC * attempt)
                     logger.warning(
-                        "Retrying %s after OSError (attempt %s/%s): %s",
+                        "Retrying %s after OSError (attempt %s/%s backoff=%.2fs): %s",
                         command,
                         attempt,
                         TRANSPORT_MAX_ATTEMPTS,
+                        backoff,
                         exc,
                     )
-                    time.sleep(TRANSPORT_RETRY_BACKOFF_SEC * attempt)
+                    time.sleep(backoff)
                 except Exception as exc:  # noqa: BLE001 — surface unexpected errors to tools
                     logger.error("Error sending command %s: %s", command, exc)
                     self.disconnect()
@@ -419,22 +466,18 @@ def get_unreal_connection() -> Optional[UnrealConnection]:
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
-    """Handle server startup and shutdown."""
+    """Handle server startup and shutdown.
+
+    Do not handshake the Unreal bridge here. MCP clients such as Antigravity
+    CLI send ``initialize`` as soon as the process starts and close stdin if
+    the first JSON-RPC reply waits on a TCP ping. Bridge connect stays lazy
+    via ``get_unreal_connection()`` on first tool use.
+    """
     global _unreal_connection
     logger.info(
-        "UnrealMCP server starting up (bridge protocol %s)",
+        "UnrealMCP server starting up (bridge protocol %s; lazy bridge connect)",
         PROTOCOL_VERSION,
     )
-    try:
-        _unreal_connection = get_unreal_connection()
-        if _unreal_connection:
-            logger.info("Connected to Unreal Engine on startup")
-        else:
-            logger.warning("Could not connect to Unreal Engine on startup")
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Error connecting to Unreal Engine on startup: %s", exc)
-        _unreal_connection = None
-
     try:
         yield {}
     finally:
@@ -594,4 +637,4 @@ def info():
 
 if __name__ == "__main__":
     logger.info("Starting MCP server with stdio transport (protocol %s)", PROTOCOL_VERSION)
-    mcp.run(transport="stdio")
+    anyio.run(run_fastmcp_stdio, mcp)

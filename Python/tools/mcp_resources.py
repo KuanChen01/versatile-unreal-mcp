@@ -68,8 +68,8 @@ def register_mcp_resources(mcp: FastMCP) -> None:
     )
     def resource_bridge_status() -> str:
         from unreal_mcp_server import SERVER_NAME, SERVER_VERSION
+        from bridge_protocol import EXPECTED_HANDLER_BUILD
 
-        EXPECTED_HANDLER_BUILD = "2026-08-11.2"
         response = run_bridge_command("get_bridge_status")
         response["server"] = {
             "name": SERVER_NAME,

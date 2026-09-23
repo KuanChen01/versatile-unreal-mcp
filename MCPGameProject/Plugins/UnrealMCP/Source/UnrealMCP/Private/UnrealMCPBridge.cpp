@@ -72,7 +72,7 @@ namespace
 
     // Bump when command handlers change in a way agents must detect after hot-reload/copy drift.
     // Surfaced on get_bridge_status as plugin.handler_build.
-    const FString UnrealMCPHandlerBuild = TEXT("2026-08-11.2");
+    const FString UnrealMCPHandlerBuild = TEXT("2026-09-23.1");
 
     const TArray<FString>& GetEditorCommandTypes()
     {
@@ -407,7 +407,9 @@ void UUnrealMCPBridge::StartServer()
     }
 
     // Start listening
-    if (!NewListenerSocket->Listen(5))
+    // Larger backlog so multi-agent / rapid one-shot reconnects are not dropped
+    // while the server thread finishes the previous session.
+    if (!NewListenerSocket->Listen(32))
     {
         UE_LOG(LogTemp, Error, TEXT("UnrealMCPBridge: Failed to start listening"));
         return;

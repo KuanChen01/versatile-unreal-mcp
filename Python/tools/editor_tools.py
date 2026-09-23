@@ -30,9 +30,7 @@ def register_editor_tools(mcp: FastMCP):
         When disconnected, returns success=false with recovery_hint (Editor offline).
         """
         from unreal_mcp_server import SERVER_NAME, SERVER_VERSION
-
-        # Expected stamp after this repo's Python + plugin co-upgrade (bump with C++ UnrealMCPHandlerBuild).
-        EXPECTED_HANDLER_BUILD = "2026-08-11.2"
+        from bridge_protocol import EXPECTED_HANDLER_BUILD
 
         normalized = run_bridge_command("get_bridge_status")
         normalized["server"] = {
@@ -64,7 +62,8 @@ def register_editor_tools(mcp: FastMCP):
             normalized["handler_build_mismatch"] = True
             normalized["recovery_hint"] = (
                 "Plugin did not report handler_build (older binary). "
-                "Upgrade UnrealMCP plugin to 1.1+ / handler_build 2026-08-11.2 and full restart Editor."
+                f"Upgrade UnrealMCP plugin to handler_build {EXPECTED_HANDLER_BUILD} "
+                "and full restart Editor."
             )
         else:
             normalized["handler_build_mismatch"] = False
